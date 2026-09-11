@@ -1,6 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { redactValue } from "./privacy.ts";
+import type { ReviewAttempt } from "./attempt.ts";
 
 export interface AuditRecord {
   timestamp: string;
@@ -10,6 +11,9 @@ export interface AuditRecord {
   operationHash: string;
   parameterSummary: { keys: string[]; bytes: number };
   model: string | null;
+  /** True when a fallback candidate produced the verdict; `model` then names that model. */
+  fallbackUsed?: boolean;
+  attempts?: ReviewAttempt[];
   decision: "allow" | "deny" | "ask" | "error";
   reason: string;
   recommendation?: { action: "approve" | "deny"; reason: string };

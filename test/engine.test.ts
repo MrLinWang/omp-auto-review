@@ -6,9 +6,45 @@ import type { AuditRecord } from "../src/audit.ts";
 import { defaults } from "../src/config.ts";
 import type { Verdict } from "../src/reviewer.ts";
 import { builtin, call, context, workspace } from "./helpers.ts";
+import { reviewWithFallback } from "../src/fallback.ts";
+import { ReviewAttemptError } from "../src/attempt.ts";
 
 const allow: Verdict = { decision: "allow", risk: "low", authorization: "implicit", reason: "任务范围内" };
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+test("failed fallback chain shows and audits the last model and each failure", async () => {
+  const w = await workspace();
+  try {
+    const f = fixture({ review: async (_request, config, _ctx, signal, observer) =>
+      reviewWithFallback(["test/primary", "test/backup"], config.reviewTimeoutMs, signal, async (_model, _signal, index) => {
+        throw new ReviewAttemptError(index === 0 ? "invalid_response" : "output_limit");
+      }, observer),
+    });
+    const c = context(w.cwd, async title => {
+      assert.ok(title.includes("最后尝试模型：test/backup（备用）"));
+      assert.ok(title.includes("test/primary：响应格式无效"));
+      assert.ok(title.includes("test/backup：输出达到上限"));
+      return "拒绝执行";
+    });
+    assert.equal((await f.engine.handle(call(), c.ctx))?.block, true);
+    assert.equal(f.records[0].model, "test/backup");
+    assert.deepEqual(f.records[0].attempts?.map(attempt => attempt.status), ["invalid_response", "output_limit"]);
+  } finally { await w.cleanup(); }
+});
+
+test("outer review timeout preserves diagnostics and ignores late attempt updates", async () => {
+  const w = await workspace();
+  try {
+    const f = fixture({
+      config: () => ({ ...defaults, model: "test/primary", reviewTimeoutMs: 15, confirmationTimeoutMs: 200 }),
+      review: async (_request, _config, _ctx, signal, observer) =>
+        reviewWithFallback(["test/primary"], 1000, signal, async () => new Promise(() => {}), observer),
+    });
+    assert.equal((await f.engine.handle(call(), context(w.cwd).ctx))?.block, true);
+    await sleep(5);
+    assert.equal(f.records[0].attempts?.[0].status, "timeout");
+    assert.ok(f.records[0].reason.includes("test/primary：超时"));
+  } finally { await w.cleanup(); }
+});
 
 test("recommendation timeout acts on ask only and records automatic rather than human approval", async () => {
   const w = await workspace();

@@ -2,7 +2,8 @@ import type { AuditRecord } from "./audit.ts";
 import type { ToolCall } from "./policy.ts";
 import { redact, safeText } from "./privacy.ts";
 
-export type ReviewResult = Pick<AuditRecord, "decision" | "outcome" | "humanOverride" | "automaticRecommendation">;
+/** `model` is carried only when a fallback candidate decided, so the label can name it. */
+export type ReviewResult = Pick<AuditRecord, "decision" | "outcome" | "humanOverride" | "automaticRecommendation" | "fallbackUsed"> & { model?: string | null };
 
 /** Label for the last completed review; automatic decisions are never shown as human approvals. */
 export function reviewStatus(operation: ToolCall, result: ReviewResult): string {
@@ -19,5 +20,7 @@ export function reviewStatus(operation: ToolCall, result: ReviewResult): string 
   const summary = safeText(redact(`${operation.toolName}${detail ? `: ${detail}` : ""}`))
     .replace(/\s+/g, " ").trim();
   const chars = Array.from(summary);
-  return `${label} · ${chars.length > 100 ? `${chars.slice(0, 99).join("")}…` : summary}`;
+  const fallback = result.fallbackUsed ? `（备用：${safeText(redact(result.model ?? "未知"))}）` : "";
+  // The fallback marker precedes the summary so a truncated summary never hides it.
+  return `${label}${fallback} · ${chars.length > 100 ? `${chars.slice(0, 99).join("")}…` : summary}`;
 }

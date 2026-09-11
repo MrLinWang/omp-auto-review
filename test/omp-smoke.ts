@@ -14,7 +14,7 @@ try {
   await mkdir(runtimePackage);
   await cp(join(repo, "src"), join(runtimePackage, "src"), { recursive: true });
   await cp(join(repo, "package.json"), join(runtimePackage, "package.json"));
-  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny"])) {
+  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail"])) {
     const cwd = join(root, scenario, "work"), agentDir = join(root, scenario, "agent");
     await mkdir(cwd, { recursive: true });
     await mkdir(join(agentDir, "agents"), { recursive: true });
@@ -41,7 +41,11 @@ task:
     enabled: false
 `);
     await writeFile(join(agentDir, "agents", "review-child.md"), "---\nname: review-child\ndescription: Isolated smoke child\nmodel: review-test/child\n---\nRun one bash command then yield.\n");
-    if (scenario !== "missing") await writeFile(join(agentDir, "auto-review.json"), JSON.stringify({ model: "review-test/reviewer", ...(scenario.startsWith("tui-auto-") ? { recommendationTimeoutMs: 1000 } : {}) }));
+    if (scenario !== "missing") await writeFile(join(agentDir, "auto-review.json"), JSON.stringify({
+      model: scenario === "fallback-missing" ? "review-test/missing" : "review-test/reviewer",
+      ...(scenario.startsWith("fallback-") ? { fallbackModels: ["review-test/backup"], reviewTimeoutMs: 2000 } : {}),
+      ...(scenario.startsWith("tui-auto-") ? { recommendationTimeoutMs: 1000 } : {}),
+    }));
     const args = ["--cwd", cwd, "--no-extensions", "--extension", join(repo, "test/fixtures/mock-provider.ts"), "--extension", runtimePackage,
       "--model", "review-test/main", "--no-skills", "--no-rules", "--no-lsp", "--no-title", "--no-prewalk", "--no-pty", "--no-session",
       "--tools", "bash,task,write", "--thinking", "off", "--mode", "json", "--print", "--max-time", "45",
@@ -70,7 +74,7 @@ task:
     assert.equal(result.code, 0, `${scenario}: omp failed\n${result.output.slice(-6000)}`);
     assert.ok(result.output.includes("SMOKE_DONE"), `${scenario}: main agent did not finish\n${result.output.slice(-4000)}`);
     const marker = await access(join(cwd, "marker.txt")).then(() => true, () => false);
-    assert.equal(marker, scenario === "allow" || scenario === "tui-approve" || scenario === "tui-auto-approve", `${scenario}: unexpected command execution`);
+    assert.equal(marker, ["allow", "tui-approve", "tui-auto-approve", "fallback-invalid", "fallback-timeout", "fallback-missing"].includes(scenario), `${scenario}: unexpected command execution`);
     const events = (await readFile(trace, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
     const auditDir = join(agentDir, "auto-review", "audit");
     const auditFiles = await readdir(auditDir).catch(() => []);
@@ -79,6 +83,22 @@ task:
     if (scenario !== "native-deny") assert.ok(audit.includes('"toolName":"bash"') || scenario === "child", "audit missing");
     if (isTui) assert.ok(audit.includes(`"humanOverride":${scenario === "tui-approve"}`), "incorrect human override audit");
     if (scenario.startsWith("tui-auto-")) assert.ok(audit.includes('"automaticRecommendation":true'), "automatic recommendation audit missing");
+    if (["fallback-invalid", "fallback-timeout", "fallback-missing"].includes(scenario)) {
+      assert.ok(events.some(e => e.role === "review" && e.model === "backup"), "fallback not called");
+      assert.ok(audit.includes('"model":"review-test/backup"') && audit.includes('"fallbackUsed":true'), "actual reviewer not audited");
+    }
+    if (["fallback-deny", "fallback-ask"].includes(scenario)) {
+      assert.ok(!events.some(e => e.role === "review" && e.model === "backup"), "valid verdict incorrectly triggered fallback");
+    }
+    if (scenario === "fallback-all-fail") {
+      assert.ok(events.some(e => e.role === "review" && e.model === "backup"), "fallback not attempted");
+      assert.ok(audit.includes('"decision":"error"'), "failed chain not audited as error");
+      const record = audit.trim().split("\n").map(line => JSON.parse(line)).find(record => record.toolName === "bash");
+      assert.equal(record.model, "review-test/backup");
+      assert.deepEqual(record.attempts.map((attempt: { model: string; status: string }) => [attempt.model, attempt.status]), [
+        ["review-test/reviewer", "invalid_response"], ["review-test/backup", "invalid_response"],
+      ]);
+    }
     if (scenario === "child") {
       assert.ok(events.some(e => e.role === "session" && e.model === "child"), "child session did not load extensions");
       assert.ok(events.some(e => e.role === "review" && e.tool === "task"), "task dispatch was not reviewed");

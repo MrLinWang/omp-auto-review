@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 export interface ReviewConfig {
   model?: string;
+  fallbackModels: string[];
   reviewTimeoutMs: number;
   confirmationTimeoutMs: number;
   recommendationTimeoutMs?: number;
@@ -12,6 +13,7 @@ export interface ReviewConfig {
 }
 
 export const defaults: Readonly<ReviewConfig> = Object.freeze({
+  fallbackModels: [],
   reviewTimeoutMs: 20_000,
   confirmationTimeoutMs: 90_000,
   recommendationTimeoutMs: 15_000,
@@ -24,12 +26,23 @@ export function parseConfig(value: unknown): ReviewConfig {
   const obj = value as Record<string, unknown>;
   const known = new Set(["model", ...Object.keys(defaults)]);
   for (const key of Object.keys(obj)) if (!known.has(key)) throw new Error(`未知配置字段：${key}`);
-  const result = { ...defaults };
+  // Never share the default array: callers may mutate the parsed result.
+  const result = { ...defaults, fallbackModels: [] as string[] };
   if (obj.model !== undefined) {
     if (typeof obj.model !== "string" || !/^[^\s/]+\/\S+$/.test(obj.model)) {
       throw new Error("model 必须是完整的 provider/model");
     }
     result.model = obj.model;
+  }
+  if (obj.fallbackModels !== undefined) {
+    if (!Array.isArray(obj.fallbackModels) || obj.fallbackModels.length > 8 ||
+        obj.fallbackModels.some(value => typeof value !== "string" || !/^[^\s/]+\/\S+$/.test(value))) {
+      throw new Error("fallbackModels 必须是最多 8 个完整 provider/model 组成的数组");
+    }
+    // Duplicates would waste the shared budget; the primary is already the first candidate.
+    const fallbackModels = [...new Set(obj.fallbackModels as string[])];
+    if (obj.model && fallbackModels.includes(obj.model as string)) throw new Error("fallbackModels 不能包含主审核模型");
+    result.fallbackModels = fallbackModels;
   }
   for (const key of ["reviewTimeoutMs", "confirmationTimeoutMs", "maxOperationBytes", "maxContextBytes"] as const) {
     if (obj[key] === undefined) continue;

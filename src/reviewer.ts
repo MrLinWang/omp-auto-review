@@ -8,6 +8,9 @@ export interface Verdict {
   authorization: "explicit" | "implicit" | "none" | "unclear";
   reason: string;
   recommendation?: { action: "approve" | "deny"; reason: string };
+  /** Set by the review chain (reviewWithFallback) after a valid verdict; never accepted from model output. */
+  reviewerModel?: string;
+  fallbackUsed?: boolean;
 }
 export interface ReviewRequest {
   operation: ToolCall;

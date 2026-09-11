@@ -33,8 +33,11 @@ export default function autoReview(pi: ExtensionAPI): void {
   const status = (ctx: ExtensionContext): string => {
     let ready = false;
     if (config.model) {
-      const slash = config.model.indexOf("/");
-      ready = Boolean(ctx.modelRegistry.find(config.model.slice(0, slash), config.model.slice(slash + 1)));
+      // Any resolvable candidate counts: the primary may be missing while a backup still runs.
+      ready = [config.model, ...config.fallbackModels].some(spec => {
+        const slash = spec.indexOf("/");
+        return Boolean(ctx.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1)));
+      });
     }
     return configError ? "未就绪：配置无效" : ready ? `已启用：${config.model}` : "未就绪：请配置可用的审核模型；受审操作需人工确认";
   };
@@ -70,7 +73,7 @@ export default function autoReview(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       const parts = args.trim().split(/\s+/);
       if (!args.trim() || (parts[0] === "status" && parts.length === 1)) {
-        ctx.ui.notify(safeText(`${status(ctx)}\n配置：${store.path}\n审核超时：${config.reviewTimeoutMs}ms；确认超时：${config.confirmationTimeoutMs}ms；自动决策等待：${config.recommendationTimeoutMs ?? 15_000}ms（0 为关闭）\n受限子 agent 不继承插件；原生审批仍生效。`), "info");
+        ctx.ui.notify(safeText(`${status(ctx)}\n备用模型：${config.fallbackModels.join(" → ") || "未配置"}\n配置：${store.path}\n审核总超时：${config.reviewTimeoutMs}ms；确认超时：${config.confirmationTimeoutMs}ms；自动决策等待：${config.recommendationTimeoutMs ?? 15_000}ms（0 为关闭）\n受限子 agent 不继承插件；原生审批仍生效。`), "info");
       } else if (parts[0] === "reload" && parts.length === 1) await load(ctx);
       else if (parts[0] === "model" && parts.length === 2) {
         const spec = parts[1];
@@ -81,7 +84,7 @@ export default function autoReview(pi: ExtensionAPI): void {
         }
         engine.cancel();
         try {
-          await store.save({ ...config, model: spec });
+          await store.save({ ...config, model: spec, fallbackModels: config.fallbackModels.filter(model => model !== spec) });
           await load(ctx);
         } catch { ctx.ui.notify("无法保存用户级审核配置", "error"); }
       } else ctx.ui.notify("用法：/auto-review status | model <provider/model> | reload", "info");

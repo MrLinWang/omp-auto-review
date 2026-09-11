@@ -7,13 +7,14 @@ import type { ReviewRequest, Verdict } from "./reviewer.ts";
 import { authorityFingerprint } from "./context.ts";
 import type { ReviewResult } from "./status.ts";
 import { selectConfirmation } from "./confirmation.ts";
+import { formatAttempts, type AttemptObserver, type ReviewAttempt } from "./attempt.ts";
 
 export interface Dependencies {
   config(): ReviewConfig;
   sources(): ToolSource[];
   history?(ctx: ExtensionContext): unknown[];
   protectedRoots: string[];
-  review(request: ReviewRequest, config: ReviewConfig, ctx: ExtensionContext, signal: AbortSignal): Promise<Verdict>;
+  review(request: ReviewRequest, config: ReviewConfig, ctx: ExtensionContext, signal: AbortSignal, onAttempt?: AttemptObserver): Promise<Verdict>;
   audit(record: AuditRecord): Promise<void>;
   onResult?(operation: ToolCall, result: ReviewResult, ctx: ExtensionContext): void;
 }
@@ -71,6 +72,8 @@ export class ReviewEngine {
     let reason = "审核未完成";
     let recommendation: Verdict["recommendation"];
     let model: string | null = null;
+    let fallbackUsed = false;
+    const attempts: ReviewAttempt[] = [];
     try {
       snapshot = JSON.parse(canonical(event)) as ToolCall;
       hash = fingerprint({ sessionId, cwd, operation: snapshot });
@@ -81,7 +84,7 @@ export class ReviewEngine {
 
       let config: ReviewConfig;
       try { config = this.deps.config(); }
-      catch { config = { reviewTimeoutMs: 20_000, confirmationTimeoutMs: 90_000, maxOperationBytes: 32_768, maxContextBytes: 24_576 }; }
+      catch { config = { fallbackModels: [], reviewTimeoutMs: 20_000, confirmationTimeoutMs: 90_000, maxOperationBytes: 32_768, maxContextBytes: 24_576 }; }
       model = config.model ?? null;
       const history = this.deps.history?.(ctx) ?? ctx.sessionManager.getBranch();
       const authority = authorityFingerprint(history);
@@ -92,19 +95,38 @@ export class ReviewEngine {
       const abortReview = () => reviewController.abort();
       controller.signal.addEventListener("abort", abortReview, { once: true });
       const timer = setTimeout(abortReview, config.reviewTimeoutMs);
+      let acceptingAttempts = true;
+      let attemptStarted = Date.now();
       try {
         if (!config.model) throw new Error("审核模型未配置或配置无效");
         const verdict = await withSignal(this.deps.review({
           operation: snapshot, cwd, trigger: policy.reason, history,
-        }, config, ctx, reviewController.signal), reviewController.signal);
+        }, config, ctx, reviewController.signal, attempt => {
+          if (!acceptingAttempts) return;
+          if (attempt.status === "running") attemptStarted = Date.now();
+          const index = attempts.findIndex(previous => previous.model === attempt.model);
+          if (index === -1) attempts.push({ ...attempt });
+          else attempts[index] = { ...attempt };
+          model = attempt.model;
+        }), reviewController.signal);
         decision = verdict.decision;
+        // The chain reports which candidate decided; `model` falls back to the configured primary.
+        model = verdict.reviewerModel ?? model;
+        fallbackUsed = verdict.fallbackUsed === true;
         reason = redact(verdict.reason);
         if (verdict.decision === "ask" && verdict.recommendation) {
           recommendation = { action: verdict.recommendation.action, reason: redact(verdict.recommendation.reason) };
         }
       } catch {
+        const pending = attempts.at(-1);
+        if (pending && (pending.status === "running" || pending.status === "cancelled")) {
+          pending.status = controller.signal.aborted ? "cancelled" : reviewController.signal.aborted ? "timeout" : "call_error";
+          pending.elapsedMs = Date.now() - attemptStarted;
+        }
         reason = config.model ? "审核模型调用失败、超时或响应无效，需人工确认" : "审核模型未配置或配置无效，需人工确认";
+        if (attempts.length) reason = `未获得有效审核结论，需人工确认。尝试结果：${formatAttempts(attempts)}`;
       } finally {
+        acceptingAttempts = false;
         clearTimeout(timer);
         reviewController.abort();
         controller.signal.removeEventListener("abort", abortReview);
@@ -130,7 +152,7 @@ export class ReviewEngine {
                 : "\n模型推荐：未提供" : "";
               const countdown = delay ? `\n${delay / 1000} 秒内未选择，将自动${recommendation!.action === "approve" ? "批准" : "拒绝"}本次调用；取消可阻止自动决策。` : "";
               const result = await selectConfirmation(ctx, safeText(
-                `自动审核：${decision}\n原因：${reason}${advice}${countdown}\n工作目录：${cwd}\n工具：${snapshot.toolName}\n调用：${snapshot.toolCallId}\n${operationText}`,
+                `自动审核：${decision}\n${decision === "error" ? "最后尝试模型" : "审核模型"}：${model}${fallbackUsed || attempts.length > 1 ? "（备用）" : ""}\n原因：${reason}${advice}${countdown}\n工作目录：${cwd}\n工具：${snapshot.toolName}\n调用：${snapshot.toolCallId}\n${operationText}`,
               ), controller.signal, timeout, delay);
               if (controller.signal.aborted || Date.now() >= deadline) return false;
               automaticRecommendation = result === "recommendation";
@@ -148,7 +170,7 @@ export class ReviewEngine {
       await withSignal(this.deps.audit({
         timestamp: new Date().toISOString(), sessionId, toolCallId: snapshot.toolCallId, toolName: snapshot.toolName,
         operationHash: hash, parameterSummary: { keys: Object.keys(snapshot.input), bytes: Buffer.byteLength(canonical(snapshot.input)) },
-        model, decision, reason, ...(recommendation ? { recommendation } : {}), outcome, humanOverride, ...(automaticRecommendation ? { automaticRecommendation: true } : {}), elapsedMs: Date.now() - started,
+        model, ...(attempts.length ? { attempts } : {}), ...(fallbackUsed ? { fallbackUsed: true } : {}), decision, reason, ...(recommendation ? { recommendation } : {}), outcome, humanOverride, ...(automaticRecommendation ? { automaticRecommendation: true } : {}), elapsedMs: Date.now() - started,
       }), controller.signal);
       // Audit I/O can yield; re-check cancellation and mutation after it too.
       if (controller.signal.aborted || authorizationChanged() || ctx.sessionManager.getSessionId() !== sessionId || ctx.cwd !== cwd ||
@@ -168,7 +190,7 @@ export class ReviewEngine {
     } finally {
       // Only reviews that ran on a still-current call are reported.
       if (reviewed && snapshot && !controller.signal.aborted && ctx.sessionManager.getSessionId() === sessionId && ctx.cwd === cwd) {
-        try { this.deps.onResult?.(snapshot, { decision, outcome, humanOverride, ...(automaticRecommendation ? { automaticRecommendation: true } : {}) }, ctx); }
+        try { this.deps.onResult?.(snapshot, { decision, outcome, humanOverride, ...(fallbackUsed ? { fallbackUsed: true, model } : {}), ...(automaticRecommendation ? { automaticRecommendation: true } : {}) }, ctx); }
         catch { /* Status rendering must not change an approval decision. */ }
       }
       if (overallTimer) clearTimeout(overallTimer);
