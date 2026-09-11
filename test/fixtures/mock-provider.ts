@@ -1,0 +1,51 @@
+// Loaded only by the isolated real-OMP smoke suite. No network or real credentials.
+import { appendFileSync } from "node:fs";
+import { createMockModel, type Api, type MockResponse } from "@oh-my-pi/pi-ai";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function mockProvider(pi: ExtensionAPI) {
+  const scenario = process.env.OMP_REVIEW_TEST_CASE!;
+  pi.registerProvider("review-test", {
+    baseUrl: "https://example.invalid", apiKey: "local-test-credential", api: "review-test-api" as Api,
+    models: ["main", "reviewer", "child"].map(id => ({
+      id, name: id, reasoning: false, input: ["text"] as "text"[],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100_000, maxTokens: 4096,
+    })),
+    streamSimple(model, ctx, options) {
+      let response: MockResponse;
+      if (model.id === "reviewer") {
+        if (ctx.tools?.length) throw new Error("Reviewer must not have tools");
+        const input = JSON.parse(String(ctx.messages[0].content));
+        if (scenario === "child" && input.operation.toolName === "bash" && input.latestUserInstruction?.source !== "ancestor_user_message") {
+          throw new Error("Child reviewer did not receive verified ancestor user context");
+        }
+        appendFileSync(process.env.OMP_REVIEW_TEST_TRACE!, JSON.stringify({ role: "review", tool: input.operation.toolName, input: input.operation.input }) + "\n");
+        const denied = scenario === "deny" || scenario.startsWith("tui-") || (["child", "xd"].includes(scenario) && input.operation.toolName === "bash");
+        response = { content: [scenario === "invalid" ? "not JSON" : JSON.stringify({
+          decision: denied ? "deny" : "allow", risk: "low", authorization: "explicit", reason: denied ? "测试拒绝" : "测试批准",
+        })] };
+      } else {
+        const results = ctx.messages.filter(m => m.role === "toolResult");
+        // Parent histories can be inherited by children; count only our own bash result.
+        const ownDone = model.id === "child" ? results.some(m => m.toolName === "bash") : results.length > 0;
+        if (ownDone) response = model.id === "child"
+          ? { content: [{ type: "toolCall", name: "yield", arguments: { message: "child done" } }] }
+          : { content: ["SMOKE_DONE"] };
+        else if (model.id === "main" && scenario === "child") response = { content: [{ type: "toolCall", name: "task", arguments: {
+          agent: "task", task: "Run the isolated marker command; obey tool rejection.", isolated: false,
+        } }] };
+        else if (scenario === "xd") response = { content: [{ type: "toolCall", name: "write", arguments: {
+          path: "xd://bash", content: JSON.stringify({ command: "printf reviewed > marker.txt" }),
+        } }] };
+        else response = { content: [{ type: "toolCall", name: "bash", arguments: {
+          command: "printf reviewed > marker.txt",
+        } }] };
+      }
+      const mock = createMockModel({ id: model.id, provider: model.provider, responses: [response] });
+      return mock.stream(model, ctx, options);
+    },
+  });
+  pi.on("session_start", (_event, ctx) => {
+    appendFileSync(process.env.OMP_REVIEW_TEST_TRACE!, JSON.stringify({ role: "session", sessionId: ctx.sessionManager.getSessionId(), model: ctx.model?.id, mode: ctx.mode, tools: pi.getAllTools().map(t => ({ name: t.name, sourceInfo: t.sourceInfo })) }) + "\n");
+  });
+}

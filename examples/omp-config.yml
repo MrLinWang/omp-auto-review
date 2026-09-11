@@ -1,0 +1,4 @@
+# Pass explicitly with: omp --config /absolute/path/to/omp-config.yml -e /path/to/omp-auto-review
+# Keeps the existing approval policy. This overlay does not change tools.approvalMode.
+extensionHandlers:
+  toolCallTimeoutMs: 120000

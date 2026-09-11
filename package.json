@@ -1,0 +1,30 @@
+{
+  "name": "omp-auto-review",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Independent model review for oh-my-pi tool calls",
+  "license": "MIT",
+  "engines": { "node": ">=22.12.0" },
+  "omp": { "extensions": ["./src/index.ts"] },
+  "scripts": {
+    "test": "tsx --test test/*.test.ts",
+    "check": "tsc --noEmit",
+    "test:omp": "tsx test/omp-smoke.ts"
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-ai": "18.1.16",
+    "@oh-my-pi/pi-coding-agent": "18.1.16"
+  },
+  "peerDependenciesMeta": {
+    "@oh-my-pi/pi-ai": { "optional": true },
+    "@oh-my-pi/pi-coding-agent": { "optional": true }
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-ai": "18.1.16",
+    "@oh-my-pi/pi-coding-agent": "18.1.16",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
