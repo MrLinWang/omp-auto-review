@@ -9,6 +9,20 @@ import { join } from "node:path";
 import { call, userHistory, workspace } from "./helpers.ts";
 
 const allow = { decision: "allow", risk: "low", authorization: "implicit", reason: "任务范围内" };
+
+test("ask recommendations are validated and never convert ask to allow", () => {
+  for (const action of ["approve", "deny"]) {
+    const verdict = { ...allow, decision: "ask", recommendation: { action, reason: "范围已知，等待用户决定" } };
+    assert.deepEqual(parseVerdict(JSON.stringify(verdict)), verdict);
+  }
+  for (const recommendation of [null, [], {}, { action: "allow", reason: "x" }, { action: "approve", reason: "" }, { action: "deny", reason: "x", extra: true }]) {
+    assert.throws(() => parseVerdict(JSON.stringify({ ...allow, decision: "ask", recommendation })));
+  }
+  const converted = parseVerdict(JSON.stringify({ ...allow, risk: "critical", recommendation: { action: "approve", reason: "x" } }));
+  assert.equal(converted.decision, "ask");
+  assert.equal(converted.recommendation, undefined);
+  assert.equal(parseVerdict(JSON.stringify({ ...allow, decision: "ask" })).recommendation, undefined);
+});
 test("verdict requires strict JSON, complete fields and consistent authorization", () => {
   assert.deepEqual(parseVerdict(JSON.stringify(allow)), allow);
   for (const text of ["yes", "```json\n{}\n```", "[]", "null", "{}", JSON.stringify({ ...allow, decision: true }), JSON.stringify({ ...allow, risk: ["low"] }), JSON.stringify({ ...allow, authorization: ["explicit"] }), JSON.stringify({ ...allow, extra: true })]) {
@@ -55,6 +69,10 @@ test("config is user-scoped, validated, private; audit has no raw operation", as
     assert.equal((await stat(store.path)).mode & 0o777, 0o600);
     assert.throws(() => parseConfig({ model: "fuzzy" }));
     assert.throws(() => parseConfig({ allowAll: true }));
+    assert.equal(parseConfig({}).recommendationTimeoutMs, 15000);
+    assert.equal(parseConfig({ recommendationTimeoutMs: 0 }).recommendationTimeoutMs, 0);
+    assert.throws(() => parseConfig({ recommendationTimeoutMs: -1 }));
+    assert.throws(() => parseConfig({ recommendationTimeoutMs: 110001 }));
     assert.throws(() => parseConfig({ reviewTimeoutMs: 100_000 }));
     await writeFile(store.path, '{"token":"secret-value"');
     await assert.rejects(store.load(), error => !String(error).includes("secret-value"));

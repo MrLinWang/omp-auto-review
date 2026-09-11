@@ -1,6 +1,6 @@
 // Loaded only by the isolated real-OMP smoke suite. No network or real credentials.
 import { appendFileSync } from "node:fs";
-import { createMockModel, type Api, type MockResponse } from "@oh-my-pi/pi-ai";
+import { createMockModel, Effort, type Api, type MockResponse } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function mockProvider(pi: ExtensionAPI) {
@@ -8,12 +8,18 @@ export default function mockProvider(pi: ExtensionAPI) {
   pi.registerProvider("review-test", {
     baseUrl: "https://example.invalid", apiKey: "local-test-credential", api: "review-test-api" as Api,
     models: ["main", "reviewer", "child"].map(id => ({
-      id, name: id, reasoning: false, input: ["text"] as "text"[],
+      id, name: id, reasoning: id === "reviewer" && scenario === "allow", input: ["text"] as "text"[],
+      ...(id === "reviewer" && scenario === "allow" ? {
+        thinking: { mode: "effort" as const, efforts: [Effort.Max, Effort.High] },
+      } : {}),
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100_000, maxTokens: 4096,
     })),
     streamSimple(model, ctx, options) {
       let response: MockResponse;
       if (model.id === "reviewer") {
+        if (options?.reasoning !== (scenario === "allow" ? Effort.High : undefined)) {
+          throw new Error("Reviewer did not select the model's minimum supported effort");
+        }
         if (ctx.tools?.length) throw new Error("Reviewer must not have tools");
         const input = JSON.parse(String(ctx.messages[0].content));
         if (scenario === "child" && input.operation.toolName === "bash" && input.latestUserInstruction?.source !== "ancestor_user_message") {
@@ -22,7 +28,8 @@ export default function mockProvider(pi: ExtensionAPI) {
         appendFileSync(process.env.OMP_REVIEW_TEST_TRACE!, JSON.stringify({ role: "review", tool: input.operation.toolName, input: input.operation.input }) + "\n");
         const denied = scenario === "deny" || scenario.startsWith("tui-") || (["child", "xd"].includes(scenario) && input.operation.toolName === "bash");
         response = { content: [scenario === "invalid" ? "not JSON" : JSON.stringify({
-          decision: denied ? "deny" : "allow", risk: "low", authorization: "explicit", reason: denied ? "测试拒绝" : "测试批准",
+          decision: scenario.startsWith("tui-") ? "ask" : denied ? "deny" : "allow", risk: "low", authorization: "explicit", reason: denied ? "测试拒绝" : "测试批准",
+          ...(scenario.startsWith("tui-") ? { recommendation: { action: scenario === "tui-auto-deny" ? "deny" : "approve", reason: "隔离测试目录内的测试建议" } } : {}),
         })] };
       } else {
         const results = ctx.messages.filter(m => m.role === "toolResult");

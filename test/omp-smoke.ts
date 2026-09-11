@@ -14,7 +14,7 @@ try {
   await mkdir(runtimePackage);
   await cp(join(repo, "src"), join(runtimePackage, "src"), { recursive: true });
   await cp(join(repo, "package.json"), join(runtimePackage, "package.json"));
-  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel"])) {
+  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny"])) {
     const cwd = join(root, scenario, "work"), agentDir = join(root, scenario, "agent");
     await mkdir(cwd, { recursive: true });
     await mkdir(join(agentDir, "agents"), { recursive: true });
@@ -41,7 +41,7 @@ task:
     enabled: false
 `);
     await writeFile(join(agentDir, "agents", "review-child.md"), "---\nname: review-child\ndescription: Isolated smoke child\nmodel: review-test/child\n---\nRun one bash command then yield.\n");
-    if (scenario !== "missing") await writeFile(join(agentDir, "auto-review.json"), JSON.stringify({ model: "review-test/reviewer" }));
+    if (scenario !== "missing") await writeFile(join(agentDir, "auto-review.json"), JSON.stringify({ model: "review-test/reviewer", ...(scenario.startsWith("tui-auto-") ? { recommendationTimeoutMs: 1000 } : {}) }));
     const args = ["--cwd", cwd, "--no-extensions", "--extension", join(repo, "test/fixtures/mock-provider.ts"), "--extension", runtimePackage,
       "--model", "review-test/main", "--no-skills", "--no-rules", "--no-lsp", "--no-title", "--no-prewalk", "--no-pty", "--no-session",
       "--tools", "bash,task,write", "--thinking", "off", "--mode", "json", "--print", "--max-time", "45",
@@ -70,7 +70,7 @@ task:
     assert.equal(result.code, 0, `${scenario}: omp failed\n${result.output.slice(-6000)}`);
     assert.ok(result.output.includes("SMOKE_DONE"), `${scenario}: main agent did not finish\n${result.output.slice(-4000)}`);
     const marker = await access(join(cwd, "marker.txt")).then(() => true, () => false);
-    assert.equal(marker, scenario === "allow" || scenario === "tui-approve", `${scenario}: unexpected command execution`);
+    assert.equal(marker, scenario === "allow" || scenario === "tui-approve" || scenario === "tui-auto-approve", `${scenario}: unexpected command execution`);
     const events = (await readFile(trace, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
     const auditDir = join(agentDir, "auto-review", "audit");
     const auditFiles = await readdir(auditDir).catch(() => []);
@@ -78,6 +78,7 @@ task:
     if (["allow", "deny", "invalid"].includes(scenario)) assert.ok(events.some(e => e.role === "review" && e.tool === "bash"), "review model was not called");
     if (scenario !== "native-deny") assert.ok(audit.includes('"toolName":"bash"') || scenario === "child", "audit missing");
     if (isTui) assert.ok(audit.includes(`"humanOverride":${scenario === "tui-approve"}`), "incorrect human override audit");
+    if (scenario.startsWith("tui-auto-")) assert.ok(audit.includes('"automaticRecommendation":true'), "automatic recommendation audit missing");
     if (scenario === "child") {
       assert.ok(events.some(e => e.role === "session" && e.model === "child"), "child session did not load extensions");
       assert.ok(events.some(e => e.role === "review" && e.tool === "task"), "task dispatch was not reviewed");

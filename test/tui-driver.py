@@ -49,6 +49,8 @@ try:
                 os.write(master, b"\r")
             elif scenario == "tui-cancel":
                 os.write(master, b"\x1b")
+            elif scenario.startswith("tui-auto-"):
+                pass
             else:
                 os.write(master, b"\r")
             answered = True

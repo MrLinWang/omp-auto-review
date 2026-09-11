@@ -2,6 +2,7 @@
   "model": "YOUR_PROVIDER/YOUR_MODEL_ID",
   "reviewTimeoutMs": 20000,
   "confirmationTimeoutMs": 90000,
+  "recommendationTimeoutMs": 15000,
   "maxOperationBytes": 32768,
   "maxContextBytes": 24576
 }

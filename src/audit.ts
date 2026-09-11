@@ -12,8 +12,10 @@ export interface AuditRecord {
   model: string | null;
   decision: "allow" | "deny" | "ask" | "error";
   reason: string;
+  recommendation?: { action: "approve" | "deny"; reason: string };
   outcome: "allowed" | "blocked";
   humanOverride: boolean;
+  automaticRecommendation?: boolean;
   elapsedMs: number;
 }
 

@@ -1,7 +1,8 @@
-import { completeSimple, type SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { completeSimple } from "@oh-my-pi/pi-ai";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ReviewConfig } from "./config.ts";
 import { buildReviewData, parseVerdict, REVIEW_PROMPT, type ReviewRequest, type Verdict } from "./reviewer.ts";
+import { reviewReasoning } from "./thinking.ts";
 
 export async function reviewWithModel(request: ReviewRequest, config: ReviewConfig, ctx: ExtensionContext, signal: AbortSignal): Promise<Verdict> {
   if (!config.model) throw new Error("尚未配置审核模型");
@@ -10,6 +11,7 @@ export async function reviewWithModel(request: ReviewRequest, config: ReviewConf
   const model = ctx.modelRegistry.find(config.model.slice(0, slash), config.model.slice(slash + 1));
   if (!model) throw new Error("配置的审核模型不存在");
   const content = buildReviewData(request, config);
+  const reasoning = reviewReasoning(model);
   const response = await completeSimple(model, {
     systemPrompt: [REVIEW_PROMPT],
     messages: [{ role: "user", content, timestamp: Date.now() }],
@@ -18,7 +20,8 @@ export async function reviewWithModel(request: ReviewRequest, config: ReviewConf
     apiKey: ctx.modelRegistry.resolver(model, ctx.sessionManager.getSessionId()),
     headers: ctx.modelRegistry.getProviderHeaders(model.provider),
     sessionId: `auto-review:${ctx.sessionManager.getSessionId()}:${request.operation.toolCallId}`,
-    signal, maxTokens: 2048, reasoning: "low" as SimpleStreamOptions["reasoning"],
+    signal, maxTokens: 2048,
+    ...(reasoning === undefined ? {} : { reasoning }),
   });
   if (signal.aborted) throw new Error("审核已取消");
   if (response.stopReason !== "stop" || response.content.some(c => c.type === "toolCall")) throw new Error("审核未正常完成");

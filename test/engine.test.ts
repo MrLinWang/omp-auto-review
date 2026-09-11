@@ -9,6 +9,56 @@ import { builtin, call, context, workspace } from "./helpers.ts";
 
 const allow: Verdict = { decision: "allow", risk: "low", authorization: "implicit", reason: "任务范围内" };
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+test("recommendation timeout acts on ask only and records automatic rather than human approval", async () => {
+  const w = await workspace();
+  try {
+    for (const action of ["approve", "deny"] as const) {
+      const f = fixture({
+        config: () => ({ ...defaults, model: "test/reviewer", reviewTimeoutMs: 100, confirmationTimeoutMs: 2000, recommendationTimeoutMs: 15 }),
+        review: async () => ({ ...allow, decision: "ask", recommendation: { action, reason: "测试建议" } }),
+      });
+      const c = context(w.cwd, async title => {
+        assert.ok(title.includes("0.015 秒内未选择"));
+        return new Promise(() => {});
+      });
+      assert.equal((await f.engine.handle(call(), c.ctx))?.block, action === "approve" ? undefined : true);
+      assert.equal(f.records[0].automaticRecommendation, true);
+      assert.equal(f.records[0].humanOverride, false);
+    }
+    for (const choice of [undefined, "拒绝执行"]) {
+      const f = fixture({
+        config: () => ({ ...defaults, model: "test/reviewer", reviewTimeoutMs: 100, confirmationTimeoutMs: 2000, recommendationTimeoutMs: 15 }),
+        review: async () => ({ ...allow, decision: "ask", recommendation: { action: "approve", reason: "测试建议" } }),
+      });
+      assert.equal((await f.engine.handle(call(), context(w.cwd, async () => choice).ctx))?.block, true);
+      assert.equal(f.records[0].automaticRecommendation, undefined);
+    }
+  } finally { await w.cleanup(); }
+});
+
+test("ask recommendation is displayed and audited but requires explicit approval", async () => {
+  const w = await workspace();
+  try {
+    for (const choice of [undefined, "拒绝执行", "仅批准本次调用"]) {
+      const f = fixture({ review: async () => ({ ...allow, decision: "ask", recommendation: { action: "approve", reason: "范围已知 TOKEN=hidden" } }) });
+      const c = context(w.cwd, async (title, choices, options) => {
+        assert.ok(title.includes("模型推荐：建议批准本次调用"));
+        assert.ok(title.includes("推荐理由：范围已知"));
+        assert.ok(!title.includes("hidden"));
+        assert.equal(options.initialIndex, 0);
+        assert.equal(choices[0], "拒绝执行");
+        return choice;
+      });
+      const result = await f.engine.handle(call(), c.ctx);
+      assert.equal(result?.block, choice === "仅批准本次调用" ? undefined : true);
+      assert.equal(f.records[0].decision, "ask");
+      assert.equal(f.records[0].recommendation?.action, "approve");
+      assert.ok(!JSON.stringify(f.records).includes("hidden"));
+    }
+  } finally { await w.cleanup(); }
+});
+
 function fixture(overrides: Partial<Dependencies> = {}) {
   const records: AuditRecord[] = [];
   let reviews = 0;
@@ -148,5 +198,21 @@ test("changed ancestor authorization invalidates a pending child approval", asyn
       return allow;
     } });
     assert.equal((await f.engine.handle(call(), context(w.cwd).ctx))?.block, true);
+  } finally { await w.cleanup(); }
+});
+
+test("status reports final reviewed outcome, skips bypasses, and cannot affect approval", async () => {
+  const w = await workspace();
+  try {
+    const updates: unknown[] = [];
+    const f = fixture({ onResult: (operation, result) => { updates.push({ tool: operation.toolName, ...result }); } });
+    await f.engine.handle(call(), context(w.cwd).ctx);
+    await f.engine.handle(call("read", { path: "a.ts" }), context(w.cwd).ctx);
+    assert.deepEqual(updates, [{ tool: "bash", decision: "allow", outcome: "allowed", humanOverride: false }]);
+    const g = fixture({ audit: async () => { throw new Error("disk full"); }, onResult: (operation, result) => { updates.push({ tool: operation.toolName, ...result }); } });
+    assert.equal((await g.engine.handle(call(), context(w.cwd).ctx))?.block, true);
+    assert.deepEqual(updates[1], { tool: "bash", decision: "error", outcome: "blocked", humanOverride: false });
+    const h = fixture({ onResult: () => { throw new Error("UI unavailable"); } });
+    assert.equal(await h.engine.handle(call(), context(w.cwd).ctx), undefined);
   } finally { await w.cleanup(); }
 });
