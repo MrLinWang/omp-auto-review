@@ -44,14 +44,15 @@ try:
             time.sleep(0.05)
             scenario = os.environ["OMP_REVIEW_TEST_CASE"]
             if scenario == "tui-approve":
-                os.write(master, b"\x1b[B")
-                time.sleep(0.05)
                 os.write(master, b"\r")
             elif scenario == "tui-cancel":
                 os.write(master, b"\x1b")
             elif scenario.startswith("tui-auto-"):
                 pass
             else:
+                # The fixture recommends approval, so move to rejection explicitly.
+                os.write(master, b"\x1b[A")
+                time.sleep(0.05)
                 os.write(master, b"\r")
             answered = True
         if answered and not exited and b"SMOKE_DONE" in output:

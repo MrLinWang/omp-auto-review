@@ -153,7 +153,7 @@ export class ReviewEngine {
               const countdown = delay ? `\n${delay / 1000} 秒内未选择，将自动${recommendation!.action === "approve" ? "批准" : "拒绝"}本次调用；取消可阻止自动决策。` : "";
               const result = await selectConfirmation(ctx, safeText(
                 `自动审核：${decision}\n${decision === "error" ? "最后尝试模型" : "审核模型"}：${model}${fallbackUsed || attempts.length > 1 ? "（备用）" : ""}\n原因：${reason}${advice}${countdown}\n工作目录：${cwd}\n工具：${snapshot.toolName}\n调用：${snapshot.toolCallId}\n${operationText}`,
-              ), controller.signal, timeout, delay);
+              ), controller.signal, timeout, delay, recommendation?.action);
               if (controller.signal.aborted || Date.now() >= deadline) return false;
               automaticRecommendation = result === "recommendation";
               return result === "approve" || (automaticRecommendation && recommendation?.action === "approve");

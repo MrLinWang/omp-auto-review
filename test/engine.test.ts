@@ -82,9 +82,10 @@ test("ask recommendation is displayed and audited but requires explicit approval
         assert.ok(title.includes("模型推荐：建议批准本次调用"));
         assert.ok(title.includes("推荐理由：范围已知"));
         assert.ok(!title.includes("hidden"));
-        assert.equal(options.initialIndex, 0);
+        assert.equal(options.initialIndex, 1);
         assert.equal(choices[0], "拒绝执行");
-        return choice;
+        assert.equal(choices[1], "仅批准本次调用（模型建议）");
+        return choice === "仅批准本次调用" ? choices[1] : choice;
       });
       const result = await f.engine.handle(call(), c.ctx);
       assert.equal(result?.block, choice === "仅批准本次调用" ? undefined : true);
