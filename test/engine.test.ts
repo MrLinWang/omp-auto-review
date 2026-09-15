@@ -31,6 +31,31 @@ test("failed fallback chain shows and audits the last model and each failure", a
   } finally { await w.cleanup(); }
 });
 
+test("a retried primary is never labeled as a backup", async () => {
+  const w = await workspace();
+  try {
+    const f = fixture({
+      config: () => ({ ...defaults, model: "test/primary", reviewTimeoutMs: 500, confirmationTimeoutMs: 200 }),
+      review: async (_request, config, _ctx, signal, observer) =>
+        reviewWithFallback(["test/primary"], config.reviewTimeoutMs, signal, async (_model, _signal, _index, retry) => {
+          if (!retry) throw new ReviewAttemptError("call_error");
+          return { ...allow, decision: "ask" };
+        }, observer, { retryCount: 1, retryDelayMs: 1 }),
+    });
+    const seen: string[] = [];
+    const c = context(w.cwd, async title => { seen.push(title); return "拒绝执行"; });
+    assert.equal((await f.engine.handle(call(), c.ctx))?.block, true);
+    assert.equal(seen.length, 1);
+    assert.ok(seen[0].includes("审核模型：test/primary"), seen[0]);
+    assert.ok(!seen[0].includes("（备用）"), seen[0]);
+    assert.ok(!seen[0].includes("最后尝试模型"), seen[0]);
+    assert.equal(f.records[0].fallbackUsed, undefined);
+    assert.deepEqual(f.records[0].attempts?.map(attempt => [attempt.model, attempt.attempt, attempt.status]), [
+      ["test/primary", 1, "call_error"], ["test/primary", 2, "success"],
+    ]);
+  } finally { await w.cleanup(); }
+});
+
 test("outer review timeout preserves diagnostics and ignores late attempt updates", async () => {
   const w = await workspace();
   try {

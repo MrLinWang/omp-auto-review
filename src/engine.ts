@@ -104,13 +104,14 @@ export class ReviewEngine {
         }, config, ctx, reviewController.signal, attempt => {
           if (!acceptingAttempts) return;
           if (attempt.status === "running") attemptStarted = Date.now();
-          const index = attempts.findIndex(previous => previous.model === attempt.model);
+          // Key on model and attempt number so a retry appends instead of overwriting the previous result.
+          const index = attempts.findIndex(previous => previous.model === attempt.model && previous.attempt === attempt.attempt);
           if (index === -1) attempts.push({ ...attempt });
           else attempts[index] = { ...attempt };
           model = attempt.model;
         }), reviewController.signal);
         decision = verdict.decision;
-        // The chain reports which candidate decided; `model` falls back to the configured primary.
+        // The chain names the deciding candidate; otherwise keep the last attempted model.
         model = verdict.reviewerModel ?? model;
         fallbackUsed = verdict.fallbackUsed === true;
         reason = redact(verdict.reason);
@@ -151,8 +152,11 @@ export class ReviewEngine {
                 ? `\n模型推荐：${recommendation.action === "approve" ? "建议批准本次调用" : "建议拒绝本次调用"}\n推荐理由：${recommendation.reason}`
                 : "\n模型推荐：未提供" : "";
               const countdown = delay ? `\n${delay / 1000} 秒内未选择，将自动${recommendation!.action === "approve" ? "批准" : "拒绝"}本次调用；取消可阻止自动决策。` : "";
+              // Name a backup by comparing the last attempted model with the configured primary:
+              // counting attempts would also fire when the primary itself was retried.
+              const lastModel = attempts.at(-1)?.model;
               const result = await selectConfirmation(ctx, safeText(
-                `自动审核：${decision}\n${decision === "error" ? "最后尝试模型" : "审核模型"}：${model}${fallbackUsed || attempts.length > 1 ? "（备用）" : ""}\n原因：${reason}${advice}${countdown}\n工作目录：${cwd}\n工具：${snapshot.toolName}\n调用：${snapshot.toolCallId}\n${operationText}`,
+                `自动审核：${decision}\n${decision === "error" ? "最后尝试模型" : "审核模型"}：${model}${fallbackUsed || (lastModel !== undefined && lastModel !== config.model) ? "（备用）" : ""}\n原因：${reason}${advice}${countdown}\n工作目录：${cwd}\n工具：${snapshot.toolName}\n调用：${snapshot.toolCallId}\n${operationText}`,
               ), controller.signal, timeout, delay, recommendation?.action);
               if (controller.signal.aborted || Date.now() >= deadline) return false;
               automaticRecommendation = result === "recommendation";

@@ -14,7 +14,7 @@ try {
   await mkdir(runtimePackage);
   await cp(join(repo, "src"), join(runtimePackage, "src"), { recursive: true });
   await cp(join(repo, "package.json"), join(runtimePackage, "package.json"));
-  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail"])) {
+  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail", "retry-invalid", "retry-timeout", "retry-exhausted"])) {
     const cwd = join(root, scenario, "work"), agentDir = join(root, scenario, "agent");
     await mkdir(cwd, { recursive: true });
     await mkdir(join(agentDir, "agents"), { recursive: true });
@@ -44,6 +44,7 @@ task:
     if (scenario !== "missing") await writeFile(join(agentDir, "auto-review.json"), JSON.stringify({
       model: scenario === "fallback-missing" ? "review-test/missing" : "review-test/reviewer",
       ...(scenario.startsWith("fallback-") ? { fallbackModels: ["review-test/backup"], reviewTimeoutMs: 2000 } : {}),
+      ...(scenario.startsWith("retry-") ? { fallbackModels: ["review-test/backup"], reviewTimeoutMs: 3000, modelTimeoutMs: 300, retryCount: 1, retryDelayMs: 20 } : {}),
       ...(scenario.startsWith("tui-auto-") ? { recommendationTimeoutMs: 1000 } : {}),
     }));
     const args = ["--cwd", cwd, "--no-extensions", "--extension", join(repo, "test/fixtures/mock-provider.ts"), "--extension", runtimePackage,
@@ -74,7 +75,7 @@ task:
     assert.equal(result.code, 0, `${scenario}: omp failed\n${result.output.slice(-6000)}`);
     assert.ok(result.output.includes("SMOKE_DONE"), `${scenario}: main agent did not finish\n${result.output.slice(-4000)}`);
     const marker = await access(join(cwd, "marker.txt")).then(() => true, () => false);
-    assert.equal(marker, ["allow", "tui-approve", "tui-auto-approve", "fallback-invalid", "fallback-timeout", "fallback-missing"].includes(scenario), `${scenario}: unexpected command execution`);
+    assert.equal(marker, ["allow", "tui-approve", "tui-auto-approve", "fallback-invalid", "fallback-timeout", "fallback-missing", "retry-invalid", "retry-timeout", "retry-exhausted"].includes(scenario), `${scenario}: unexpected command execution`);
     const events = (await readFile(trace, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
     const auditDir = join(agentDir, "auto-review", "audit");
     const auditFiles = await readdir(auditDir).catch(() => []);
@@ -96,8 +97,17 @@ task:
       const record = audit.trim().split("\n").map(line => JSON.parse(line)).find(record => record.toolName === "bash");
       assert.equal(record.model, "review-test/backup");
       assert.deepEqual(record.attempts.map((attempt: { model: string; status: string }) => [attempt.model, attempt.status]), [
-        ["review-test/reviewer", "invalid_response"], ["review-test/backup", "invalid_response"],
+        ["review-test/reviewer", "invalid_response"], ["review-test/reviewer", "invalid_response"],
+        ["review-test/backup", "invalid_response"], ["review-test/backup", "invalid_response"],
       ]);
+    }
+    if (scenario.startsWith("retry-")) {
+      const record = audit.trim().split("\n").map(line => JSON.parse(line)).find(record => record.toolName === "bash");
+      assert.deepEqual(record.attempts.slice(0, 2).map((attempt: { attempt: number }) => attempt.attempt), [1, 2]);
+      assert.equal(record.attempts[0].status, scenario === "retry-timeout" ? "timeout" : "invalid_response");
+      assert.equal(record.model, scenario === "retry-exhausted" ? "review-test/backup" : "review-test/reviewer");
+      assert.equal(events.filter(event => event.role === "review" && event.model === "reviewer").length, 2);
+      assert.equal(record.attempts.length, scenario === "retry-exhausted" ? 3 : 2);
     }
     if (scenario === "child") {
       assert.ok(events.some(e => e.role === "session" && e.model === "child"), "child session did not load extensions");

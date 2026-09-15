@@ -11,7 +11,7 @@ export async function reviewWithModel(request: ReviewRequest, config: ReviewConf
   const content = buildReviewData(request, config);
   // The chain is built once per call: primary first, then the configured backups in order.
   const candidates = [config.model, ...(config.fallbackModels ?? [])];
-  return reviewWithFallback(candidates, config.reviewTimeoutMs, signal, async (spec, attemptSignal, index) => {
+  return reviewWithFallback(candidates, config.reviewTimeoutMs, signal, async (spec, attemptSignal, index, retryIndex) => {
     const slash = spec.indexOf("/");
     // Every configured candidate is an exact lookup; never fall back to the agent's main model.
     const model = ctx.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1));
@@ -24,7 +24,10 @@ export async function reviewWithModel(request: ReviewRequest, config: ReviewConf
     }, {
       apiKey: ctx.modelRegistry.resolver(model, ctx.sessionManager.getSessionId()),
       headers: ctx.modelRegistry.getProviderHeaders(model.provider),
-      sessionId: `auto-review:${ctx.sessionManager.getSessionId()}:${request.operation.toolCallId}:${index}`,
+      // Distinct provider session per attempt: session routing, prompt-cache keys and the
+      // Claude Code attribution metadata are keyed off it, so a retry never inherits the
+      // failed attempt's session identity.
+      sessionId: `auto-review:${ctx.sessionManager.getSessionId()}:${request.operation.toolCallId}:${index}:${retryIndex}`,
       signal: attemptSignal, maxTokens: 2048,
       ...(reasoning === undefined ? {} : { reasoning }),
     });
@@ -34,5 +37,5 @@ export async function reviewWithModel(request: ReviewRequest, config: ReviewConf
     if (response.stopReason !== "stop" || response.content.some(c => c.type === "toolCall")) throw new ReviewAttemptError("incomplete");
     try { return parseVerdict(response.content.filter(c => c.type === "text").map(c => c.text).join("")); }
     catch { throw new ReviewAttemptError("invalid_response"); }
-  }, onAttempt);
+  }, onAttempt, { modelTimeoutMs: config.modelTimeoutMs ?? 10_000, retryCount: config.retryCount ?? 1, retryDelayMs: config.retryDelayMs ?? 500 });
 }

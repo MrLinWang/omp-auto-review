@@ -10,6 +10,8 @@ export interface ReviewAttempt {
   model: string;
   status: keyof typeof attemptLabels;
   elapsedMs: number;
+  /** 1-based call number on this model; recorded only when retries are enabled. */
+  attempt?: number;
 }
 export type AttemptObserver = (attempt: ReviewAttempt) => void;
 
@@ -29,5 +31,5 @@ export function attemptErrorCode(error: unknown): ReviewAttempt["status"] {
 }
 
 export function formatAttempts(attempts: readonly ReviewAttempt[]): string {
-  return attempts.map(attempt => `${attempt.model}：${attemptLabels[attempt.status]}（${(attempt.elapsedMs / 1000).toFixed(1)}s）`).join(" → ");
+  return attempts.map(attempt => `${attempt.model}${attempt.attempt ? ` 第${attempt.attempt}次` : ""}：${attemptLabels[attempt.status]}（${(attempt.elapsedMs / 1000).toFixed(1)}s）`).join(" → ");
 }

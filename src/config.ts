@@ -6,6 +6,9 @@ export interface ReviewConfig {
   model?: string;
   fallbackModels: string[];
   reviewTimeoutMs: number;
+  modelTimeoutMs?: number;
+  retryCount?: number;
+  retryDelayMs?: number;
   confirmationTimeoutMs: number;
   recommendationTimeoutMs?: number;
   maxOperationBytes: number;
@@ -15,6 +18,9 @@ export interface ReviewConfig {
 export const defaults: Readonly<ReviewConfig> = Object.freeze({
   fallbackModels: [],
   reviewTimeoutMs: 20_000,
+  modelTimeoutMs: 10_000,
+  retryCount: 1,
+  retryDelayMs: 500,
   confirmationTimeoutMs: 90_000,
   recommendationTimeoutMs: 15_000,
   maxOperationBytes: 32_768,
@@ -44,13 +50,21 @@ export function parseConfig(value: unknown): ReviewConfig {
     if (obj.model && fallbackModels.includes(obj.model as string)) throw new Error("fallbackModels 不能包含主审核模型");
     result.fallbackModels = fallbackModels;
   }
-  for (const key of ["reviewTimeoutMs", "confirmationTimeoutMs", "maxOperationBytes", "maxContextBytes"] as const) {
+  for (const key of ["reviewTimeoutMs", "modelTimeoutMs", "confirmationTimeoutMs", "maxOperationBytes", "maxContextBytes"] as const) {
     if (obj[key] === undefined) continue;
     if (!Number.isSafeInteger(obj[key]) || Number(obj[key]) < 1) throw new Error(`${key} 必须为正整数`);
     result[key] = obj[key] as number;
   }
   if (result.reviewTimeoutMs + result.confirmationTimeoutMs > 110_000) {
     throw new Error("审核与人工确认的总超时不能超过 110000ms（宿主建议 120000ms）");
+  }
+  // Retries and their waits share one model's time share, so both allow 0 and stay bounded.
+  for (const [key, max] of [["retryCount", 5], ["retryDelayMs", 10_000]] as const) {
+    if (obj[key] === undefined) continue;
+    if (!Number.isSafeInteger(obj[key]) || Number(obj[key]) < 0 || Number(obj[key]) > max) {
+      throw new Error(`${key} 必须为 0 到 ${max} 的整数`);
+    }
+    result[key] = Number(obj[key]);
   }
   if (obj.recommendationTimeoutMs !== undefined) {
     if (!Number.isSafeInteger(obj.recommendationTimeoutMs) || Number(obj.recommendationTimeoutMs) < 0 || Number(obj.recommendationTimeoutMs) > 110_000) {
