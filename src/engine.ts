@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ReviewConfig } from "./config.ts";
 import type { AuditRecord } from "./audit.ts";
+import type { ReviewLogRecord } from "./review-log.ts";
 import { classify, type ToolCall, type ToolSource } from "./policy.ts";
 import { canonical, fingerprint, redact, safeText } from "./privacy.ts";
 import type { ReviewRequest, Verdict } from "./reviewer.ts";
@@ -16,6 +17,8 @@ export interface Dependencies {
   protectedRoots: string[];
   review(request: ReviewRequest, config: ReviewConfig, ctx: ExtensionContext, signal: AbortSignal, onAttempt?: AttemptObserver): Promise<Verdict>;
   audit(record: AuditRecord): Promise<void>;
+  /** Required whenever the config sets `reviewLogPath`: a missing writer blocks the call instead of skipping the record. */
+  reviewLog?(path: string, record: ReviewLogRecord): Promise<void>;
   onResult?(operation: ToolCall, result: ReviewResult, ctx: ExtensionContext): void;
 }
 
@@ -159,6 +162,17 @@ export class ReviewEngine {
         controller.signal.removeEventListener("abort", abortReview);
       }
 
+      // Persist the model's conclusion before human confirmation can override it.
+      // The captured config keeps an in-flight review tied to its original log path.
+      if (config.reviewLogPath && config.model) {
+        if (!this.deps.reviewLog) throw new Error("审查日志写入器未配置");
+        await withSignal(this.deps.reviewLog(config.reviewLogPath, {
+          timestamp: new Date().toISOString(), sessionId, cwd, operation: snapshot,
+          model, fallbackUsed, decision, reason, recommendation,
+          ...(attempts.length ? { attempts: attempts.map(attempt => ({ ...attempt })) } : {}),
+        }), controller.signal);
+      }
+
       if (!controller.signal.aborted && decision === "allow") outcome = "allowed";
       else if (!controller.signal.aborted && ctx.hasUI && ctx.mode === "tui") {
         // Never offer approval of an abbreviated operation. Bound display size instead.
@@ -216,7 +230,7 @@ export class ReviewEngine {
       decision = "error";
       humanOverride = false;
       automaticRecommendation = false;
-      return { block: true, reason: "自动审核内部错误或审计记录写入失败，已阻止执行" };
+      return { block: true, reason: "自动审核内部错误或审计/审查日志写入失败，已阻止执行" };
     } finally {
       // Only reviews that ran on a still-current call are reported.
       if (reviewed && snapshot && !controller.signal.aborted && ctx.sessionManager.getSessionId() === sessionId && ctx.cwd === cwd) {

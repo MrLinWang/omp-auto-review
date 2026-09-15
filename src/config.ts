@@ -5,6 +5,8 @@ import { DEFAULT_BASH_ALLOW_COMMANDS, normalizeBashCommand, readonlyBashCommand 
 
 export interface ReviewConfig {
   model?: string;
+  /** Optional JSONL file; relative paths resolve against the user agent directory. */
+  reviewLogPath?: string;
   fallbackModels: string[];
   /** Complete read-only Bash commands that skip model review; `[]` disables the bypass. */
   bashAllowCommands?: readonly string[];
@@ -34,10 +36,16 @@ export const defaults: Readonly<ReviewConfig> = Object.freeze({
 export function parseConfig(value: unknown): ReviewConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("配置必须是 JSON 对象");
   const obj = value as Record<string, unknown>;
-  const known = new Set(["model", ...Object.keys(defaults)]);
+  const known = new Set(["model", "reviewLogPath", ...Object.keys(defaults)]);
   for (const key of Object.keys(obj)) if (!known.has(key)) throw new Error(`未知配置字段：${key}`);
   // Never share the default array: callers may mutate the parsed result.
   const result = { ...defaults, fallbackModels: [] as string[], bashAllowCommands: [...DEFAULT_BASH_ALLOW_COMMANDS] };
+  if (obj.reviewLogPath !== undefined) {
+    if (typeof obj.reviewLogPath !== "string" || !obj.reviewLogPath.trim() || obj.reviewLogPath.includes("\0")) {
+      throw new Error("reviewLogPath 必须为非空日志文件路径；删除此字段可关闭审查日志");
+    }
+    result.reviewLogPath = obj.reviewLogPath;
+  }
   if (obj.bashAllowCommands !== undefined) {
     if (!Array.isArray(obj.bashAllowCommands) || obj.bashAllowCommands.length > 64 ||
         obj.bashAllowCommands.some(command => typeof command !== "string" || !readonlyBashCommand(command))) {
