@@ -55,7 +55,12 @@ export class ReviewEngine {
     for (const controller of this.pending) controller.abort();
     this.pending.clear();
   }
-  async handle(event: ToolCall, ctx: ExtensionContext): Promise<{ block: true; reason: string } | undefined> {
+  /**
+   * Reviews one tool call. Returns `undefined` to let the call proceed as typed,
+   * `{ input }` to let a bypassed call proceed with the hardened command, and
+   * `{ block: true, reason }` to stop it.
+   */
+  async handle(event: ToolCall, ctx: ExtensionContext): Promise<{ block?: true; reason?: string; input?: Record<string, unknown> } | undefined> {
     const started = Date.now();
     const sessionId = ctx.sessionManager.getSessionId();
     const cwd = ctx.cwd;
@@ -77,14 +82,35 @@ export class ReviewEngine {
     try {
       snapshot = JSON.parse(canonical(event)) as ToolCall;
       hash = fingerprint({ sessionId, cwd, operation: snapshot });
-      const policy = await classify(snapshot, cwd, this.deps.sources().find(t => t.name === event.toolName), this.deps.protectedRoots);
-      if (controller.signal.aborted) return { block: true, reason: "审核会话已取消" };
-      if (!policy.review) return undefined;
-      reviewed = true;
-
       let config: ReviewConfig;
       try { config = this.deps.config(); }
-      catch { config = { fallbackModels: [], reviewTimeoutMs: 20_000, confirmationTimeoutMs: 90_000, maxOperationBytes: 32_768, maxContextBytes: 24_576 }; }
+      catch { config = { fallbackModels: [], bashAllowCommands: [], reviewTimeoutMs: 20_000, confirmationTimeoutMs: 90_000, maxOperationBytes: 32_768, maxContextBytes: 24_576 }; }
+      const policy = await classify(snapshot, cwd, this.deps.sources().find(t => t.name === event.toolName), this.deps.protectedRoots, config.bashAllowCommands);
+      if (controller.signal.aborted) return { block: true, reason: "审核会话已取消" };
+      if (!policy.review && policy.bashCommand && policy.bypassRule) {
+        // Rule bypass: no reviewer call, audited with model: null, and the host
+        // executes the hardened command instead of the typed one.
+        const authority = authorityFingerprint(this.deps.history?.(ctx) ?? ctx.sessionManager.getBranch());
+        const valid = () => !controller.signal.aborted && ctx.sessionManager.getSessionId() === sessionId && ctx.cwd === cwd &&
+          fingerprint({ sessionId, cwd, operation: event }) === hash &&
+          authorityFingerprint(this.deps.history?.(ctx) ?? ctx.sessionManager.getBranch()) === authority;
+        if (!valid()) return { block: true, reason: "调用已失效，请重新审核" };
+        const input = { ...snapshot.input, command: policy.bashCommand };
+        overallTimer = setTimeout(() => controller.abort(), config.reviewTimeoutMs);
+        await withSignal(this.deps.audit({
+          timestamp: new Date().toISOString(), sessionId, toolCallId: snapshot.toolCallId, toolName: snapshot.toolName,
+          operationHash: fingerprint({ sessionId, cwd, operation: { ...snapshot, input } }),
+          parameterSummary: { keys: Object.keys(input), bytes: Buffer.byteLength(canonical(input)) },
+          model: null, decision: "allow", reason: policy.reason, bypassRule: policy.bypassRule,
+          outcome: "allowed", humanOverride: false, elapsedMs: Date.now() - started,
+        }), controller.signal);
+        if (!valid()) return { block: true, reason: "调用已失效，请重新审核" };
+        try { this.deps.onResult?.(snapshot, { decision: "allow", outcome: "allowed", humanOverride: false, bypassRule: policy.bypassRule }, ctx); }
+        catch { /* A status update cannot affect execution. */ }
+        return { input };
+      }
+      if (!policy.review) return undefined;
+      reviewed = true;
       model = config.model ?? null;
       const history = this.deps.history?.(ctx) ?? ctx.sessionManager.getBranch();
       const authority = authorityFingerprint(history);

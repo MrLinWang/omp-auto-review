@@ -1,6 +1,7 @@
 {
   "model": "YOUR_PROVIDER/YOUR_MODEL_ID",
   "fallbackModels": [],
+  "bashAllowCommands": ["pwd", "git --version", "git status", "git status --short", "git status --porcelain=v1", "git diff --stat", "git diff --name-only"],
   "reviewTimeoutMs": 20000,
   "modelTimeoutMs": 10000,
   "retryCount": 1,

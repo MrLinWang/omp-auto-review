@@ -1,9 +1,17 @@
 import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { hasGitFilters, matchBashRule } from "./bash-rules.ts";
 
 export interface ToolCall { toolName: string; toolCallId: string; input: Record<string, unknown> }
 export interface ToolSource { name: string; sourceInfo?: { source: string; path?: string } }
-export interface Classification { review: boolean; reason: string }
+export interface Classification {
+  review: boolean;
+  reason: string;
+  /** Set with `bypassRule` when a read-only Bash rule matched: the hardened command to execute. */
+  bashCommand?: string;
+  /** The configured rule that matched, recorded in the audit record. */
+  bypassRule?: string;
+}
 
 export function inside(root: string, target: string): boolean {
   const rel = relative(root, target);
@@ -71,13 +79,23 @@ export function editTargets(input: Record<string, unknown>): string[] | undefine
   return undefined;
 }
 
-export async function classify(call: ToolCall, cwd: string, source: ToolSource | undefined, protectedRoots: string[]): Promise<Classification> {
+export async function classify(call: ToolCall, cwd: string, source: ToolSource | undefined, protectedRoots: string[], bashAllowCommands: readonly string[] = []): Promise<Classification> {
   const review = (reason: string): Classification => ({ review: true, reason });
   if (source?.sourceInfo?.source !== "builtin" || source.sourceInfo.path !== `<builtin:${call.toolName}>`) {
     return review("非已知内置工具、已被扩展覆盖或来源不明");
   }
   let paths: string[];
   const input = call.input;
+  if (call.toolName === "bash") {
+    // A match never runs the typed command: matchBashRule returns the hardened rewrite.
+    // Repository clean/process filters keep the call reviewed, since the query would run them.
+    const match = matchBashRule(input, bashAllowCommands);
+    if (match && match.command.includes("--no-optional-locks") && await hasGitFilters(cwd)) {
+      return review("Git 配置含过滤器或无法可靠检查，仍需模型审核");
+    }
+    return match ? { review: false, reason: "命中只读 Bash 免审规则", bashCommand: match.command, bypassRule: match.rule }
+      : review("Bash 命令未命中只读免审规则");
+  }
   if (call.toolName === "write") {
     if (typeof input.path !== "string" || typeof input.content !== "string") return review("不是可识别的普通文件写入");
     paths = [input.path];

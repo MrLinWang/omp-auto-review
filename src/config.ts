@@ -1,10 +1,13 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { DEFAULT_BASH_ALLOW_COMMANDS, normalizeBashCommand, readonlyBashCommand } from "./bash-rules.ts";
 
 export interface ReviewConfig {
   model?: string;
   fallbackModels: string[];
+  /** Complete read-only Bash commands that skip model review; `[]` disables the bypass. */
+  bashAllowCommands?: readonly string[];
   reviewTimeoutMs: number;
   modelTimeoutMs?: number;
   retryCount?: number;
@@ -17,6 +20,7 @@ export interface ReviewConfig {
 
 export const defaults: Readonly<ReviewConfig> = Object.freeze({
   fallbackModels: [],
+  bashAllowCommands: DEFAULT_BASH_ALLOW_COMMANDS,
   reviewTimeoutMs: 20_000,
   modelTimeoutMs: 10_000,
   retryCount: 1,
@@ -33,7 +37,15 @@ export function parseConfig(value: unknown): ReviewConfig {
   const known = new Set(["model", ...Object.keys(defaults)]);
   for (const key of Object.keys(obj)) if (!known.has(key)) throw new Error(`未知配置字段：${key}`);
   // Never share the default array: callers may mutate the parsed result.
-  const result = { ...defaults, fallbackModels: [] as string[] };
+  const result = { ...defaults, fallbackModels: [] as string[], bashAllowCommands: [...DEFAULT_BASH_ALLOW_COMMANDS] };
+  if (obj.bashAllowCommands !== undefined) {
+    if (!Array.isArray(obj.bashAllowCommands) || obj.bashAllowCommands.length > 64 ||
+        obj.bashAllowCommands.some(command => typeof command !== "string" || !readonlyBashCommand(command))) {
+      throw new Error("bashAllowCommands 必须是最多 64 条支持的只读完整命令，不支持通配符或 shell 组合语法");
+    }
+    // Store the normalized spelling so rule matching and display agree on one form.
+    result.bashAllowCommands = [...new Set((obj.bashAllowCommands as string[]).map(command => normalizeBashCommand(command)!))];
+  }
   if (obj.model !== undefined) {
     if (typeof obj.model !== "string" || !/^[^\s/]+\/\S+$/.test(obj.model)) {
       throw new Error("model 必须是完整的 provider/model");

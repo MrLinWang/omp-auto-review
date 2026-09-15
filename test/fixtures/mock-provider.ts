@@ -31,7 +31,7 @@ export default function mockProvider(pi: ExtensionAPI) {
           throw new Error("Child reviewer did not receive verified ancestor user context");
         }
         appendFileSync(process.env.OMP_REVIEW_TEST_TRACE!, JSON.stringify({ role: "review", model: model.id, attempt, tool: input.operation.toolName, input: input.operation.input }) + "\n");
-        const denied = scenario === "deny" || scenario === "fallback-deny" || scenario.startsWith("tui-") || (["child", "xd"].includes(scenario) && input.operation.toolName === "bash");
+        const denied = scenario === "deny" || scenario === "fallback-deny" || ["bypass-disabled", "bypass-compound"].includes(scenario) || scenario.startsWith("tui-") || (["child", "xd"].includes(scenario) && input.operation.toolName === "bash");
         const invalid = scenario === "invalid" || scenario === "fallback-all-fail" ||
           (model.id === "reviewer" && (scenario === "fallback-invalid" || scenario === "retry-exhausted" || (scenario === "retry-invalid" && attempt === 1)));
         response = { content: [invalid ? "not JSON" : JSON.stringify({
@@ -52,6 +52,9 @@ export default function mockProvider(pi: ExtensionAPI) {
         } }] };
         else if (scenario === "xd") response = { content: [{ type: "toolCall", name: "write", arguments: {
           path: "xd://bash", content: JSON.stringify({ command: "printf reviewed > marker.txt" }),
+        } }] };
+        else if (scenario.startsWith("bypass-")) response = { content: [{ type: "toolCall", name: "bash", arguments: {
+          command: ["bypass-git", "bypass-git-filter", "bypass-native-deny"].includes(scenario) ? "git status --short" : scenario === "bypass-compound" ? "pwd; printf reviewed > marker.txt" : "pwd",
         } }] };
         else response = { content: [{ type: "toolCall", name: "bash", arguments: {
           command: "printf reviewed > marker.txt",

@@ -73,7 +73,7 @@ export default function autoReview(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       const parts = args.trim().split(/\s+/);
       if (!args.trim() || (parts[0] === "status" && parts.length === 1)) {
-        ctx.ui.notify(safeText(`${status(ctx)}\n备用模型：${config.fallbackModels.join(" → ") || "未配置"}\n配置：${store.path}\n审核总超时：${config.reviewTimeoutMs}ms；单次调用上限：${config.modelTimeoutMs ?? 10_000}ms\n每个模型额外重试：${config.retryCount ?? 1}次；重试间隔：${config.retryDelayMs ?? 500}ms\n确认超时：${config.confirmationTimeoutMs}ms；自动决策等待：${config.recommendationTimeoutMs ?? 15_000}ms（0 为关闭）\n受限子 agent 不继承插件；原生审批仍生效。`), "info");
+        ctx.ui.notify(safeText(`${status(ctx)}\n备用模型：${config.fallbackModels.join(" → ") || "未配置"}\nBash 免审规则：${config.bashAllowCommands?.join("；") || "已关闭"}\n配置：${store.path}\n审核总超时：${config.reviewTimeoutMs}ms；单次调用上限：${config.modelTimeoutMs ?? 10_000}ms\n每个模型额外重试：${config.retryCount ?? 1}次；重试间隔：${config.retryDelayMs ?? 500}ms\n确认超时：${config.confirmationTimeoutMs}ms；自动决策等待：${config.recommendationTimeoutMs ?? 15_000}ms（0 为关闭）\n受限子 agent 不继承插件；原生审批仍生效。`), "info");
       } else if (parts[0] === "reload" && parts.length === 1) await load(ctx);
       else if (parts[0] === "model" && parts.length === 2) {
         const spec = parts[1];

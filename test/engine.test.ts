@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { ReviewEngine, ConfirmationQueue, type Dependencies } from "../src/engine.ts";
 import type { AuditRecord } from "../src/audit.ts";
-import { defaults } from "../src/config.ts";
+import { defaults as configDefaults } from "../src/config.ts";
 import type { Verdict } from "../src/reviewer.ts";
 import { builtin, call, context, workspace } from "./helpers.ts";
 import { reviewWithFallback } from "../src/fallback.ts";
 import { ReviewAttemptError } from "../src/attempt.ts";
 
+// These tests exercise model review; bypass behavior has dedicated coverage.
+const defaults = { ...configDefaults, bashAllowCommands: [] };
 const allow: Verdict = { decision: "allow", risk: "low", authorization: "implicit", reason: "任务范围内" };
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 test("failed fallback chain shows and audits the last model and each failure", async () => {

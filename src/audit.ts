@@ -13,6 +13,8 @@ export interface AuditRecord {
   model: string | null;
   /** True when a fallback candidate produced the verdict; `model` then names that model. */
   fallbackUsed?: boolean;
+  /** Configured read-only Bash rule that allowed the call without model review. */
+  bypassRule?: string;
   attempts?: ReviewAttempt[];
   decision: "allow" | "deny" | "ask" | "error";
   reason: string;

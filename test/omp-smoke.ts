@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtemp, mkdir, writeFile, readFile, access, readdir, rm, cp } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { resolve, join, relative } from "node:path";
@@ -14,9 +15,14 @@ try {
   await mkdir(runtimePackage);
   await cp(join(repo, "src"), join(runtimePackage, "src"), { recursive: true });
   await cp(join(repo, "package.json"), join(runtimePackage, "package.json"));
-  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail", "retry-invalid", "retry-timeout", "retry-exhausted"])) {
+  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail", "retry-invalid", "retry-timeout", "retry-exhausted", "bypass-pwd", "bypass-git", "bypass-git-filter", "bypass-disabled", "bypass-compound", "bypass-native-deny"])) {
     const cwd = join(root, scenario, "work"), agentDir = join(root, scenario, "agent");
     await mkdir(cwd, { recursive: true });
+    if (scenario.startsWith("bypass-")) {
+      await promisify(execFile)("git", ["init", "--quiet", cwd]);
+      await writeFile(join(cwd, "visible.txt"), "test\n");
+      if (scenario === "bypass-git-filter") await promisify(execFile)("git", ["-C", cwd, "config", "filter.probe.clean", "touch filter-ran"]);
+    }
     await mkdir(join(agentDir, "agents"), { recursive: true });
     const trace = join(root, scenario, "trace.jsonl");
     await writeFile(trace, "");
@@ -27,7 +33,7 @@ startup:
 tools:
   approvalMode: yolo
   intentTracing: false
-  approval: ${scenario === "native-deny" ? '{bash: deny}' : scenario === "native-prompt" ? '{bash: prompt}' : '{}'}
+  approval: ${scenario === "native-deny" || scenario === "bypass-native-deny" ? '{bash: deny}' : scenario === "native-prompt" ? '{bash: prompt}' : '{}'}
 extensionHandlers:
   toolCallTimeoutMs: 120000
 modelRoles:
@@ -43,6 +49,7 @@ task:
     await writeFile(join(agentDir, "agents", "review-child.md"), "---\nname: review-child\ndescription: Isolated smoke child\nmodel: review-test/child\n---\nRun one bash command then yield.\n");
     if (scenario !== "missing") await writeFile(join(agentDir, "auto-review.json"), JSON.stringify({
       model: scenario === "fallback-missing" ? "review-test/missing" : "review-test/reviewer",
+      ...(scenario === "bypass-disabled" ? { bashAllowCommands: [] } : {}),
       ...(scenario.startsWith("fallback-") ? { fallbackModels: ["review-test/backup"], reviewTimeoutMs: 2000 } : {}),
       ...(scenario.startsWith("retry-") ? { fallbackModels: ["review-test/backup"], reviewTimeoutMs: 3000, modelTimeoutMs: 300, retryCount: 1, retryDelayMs: 20 } : {}),
       ...(scenario.startsWith("tui-auto-") ? { recommendationTimeoutMs: 1000 } : {}),
@@ -61,7 +68,7 @@ task:
       PATH: process.env.PATH, HOME: process.env.HOME, TERM: isTui ? "xterm-256color" : "dumb", LANG: "C.UTF-8",
       PI_CODING_AGENT_DIR: agentDir, OMP_REVIEW_TEST_CASE: scenario, OMP_REVIEW_TEST_TRACE: trace,
       PI_CONFIG_DIR: relative(homedir(), join(root, scenario, "omp-state")),
-      PI_NO_PTY: "1",
+      PI_NO_PTY: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
     };
     const result = await new Promise<{ code: number | null; output: string }>((done, reject) => {
       const child = spawn(isTui ? "python3" : omp, isTui ? [join(repo, "test/tui-driver.py"), omp, ...args] : args, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
@@ -81,7 +88,25 @@ task:
     const auditFiles = await readdir(auditDir).catch(() => []);
     const audit = (await Promise.all(auditFiles.map(file => readFile(join(auditDir, file), "utf8")))).join("");
     if (["allow", "deny", "invalid"].includes(scenario)) assert.ok(events.some(e => e.role === "review" && e.tool === "bash"), "review model was not called");
-    if (scenario !== "native-deny") assert.ok(audit.includes('"toolName":"bash"') || scenario === "child", "audit missing");
+    if (!["native-deny", "bypass-native-deny"].includes(scenario)) assert.ok(audit.includes('"toolName":"bash"') || scenario === "child", "audit missing");
+    if (["bypass-pwd", "bypass-git"].includes(scenario)) {
+      assert.ok(!events.some(event => event.role === "review"), "bypass invoked reviewer");
+      assert.ok(audit.includes('"bypassRule":'), "bypass audit missing");
+      assert.ok(audit.includes('"model":null'), "bypass claimed a model review");
+    }
+    if (scenario === "bypass-git") {
+      assert.ok(result.output.includes("visible.txt"), "git query did not execute");
+      assert.ok(result.output.includes("--no-pager"), "git query was not hardened");
+    }
+    if (scenario === "bypass-native-deny") {
+      assert.ok(!result.output.includes("visible.txt"), "bypass ignored native deny");
+      assert.ok(!events.some(event => event.role === "review"), "native deny should short-circuit review");
+    }
+    if (["bypass-disabled", "bypass-compound"].includes(scenario)) assert.ok(events.some(event => event.role === "review"), "non-exempt command skipped reviewer");
+    if (scenario === "bypass-git-filter") {
+      assert.ok(events.some(event => event.role === "review"), "configured Git filter skipped reviewer");
+      assert.ok(!audit.includes('"bypassRule":'), "filtered repository incorrectly exempted");
+    }
     if (isTui) assert.ok(audit.includes(`"humanOverride":${scenario === "tui-approve"}`), "incorrect human override audit");
     if (scenario.startsWith("tui-auto-")) assert.ok(audit.includes('"automaticRecommendation":true'), "automatic recommendation audit missing");
     if (["fallback-invalid", "fallback-timeout", "fallback-missing"].includes(scenario)) {

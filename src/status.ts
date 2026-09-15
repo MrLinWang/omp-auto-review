@@ -3,11 +3,11 @@ import type { ToolCall } from "./policy.ts";
 import { redact, safeText } from "./privacy.ts";
 
 /** `model` is carried only when a fallback candidate decided, so the label can name it. */
-export type ReviewResult = Pick<AuditRecord, "decision" | "outcome" | "humanOverride" | "automaticRecommendation" | "fallbackUsed"> & { model?: string | null };
+export type ReviewResult = Pick<AuditRecord, "decision" | "outcome" | "humanOverride" | "automaticRecommendation" | "fallbackUsed" | "bypassRule"> & { model?: string | null };
 
-/** Label for the last completed review; automatic decisions are never shown as human approvals. */
+/** Label for the last completed review; rule-bypassed calls are labelled as such, and automatic decisions are never shown as human approvals. */
 export function reviewStatus(operation: ToolCall, result: ReviewResult): string {
-  const label = result.automaticRecommendation
+  const label = result.bypassRule ? "规则免审" : result.automaticRecommendation
     ? result.outcome === "allowed" ? "超时按建议放行" : "超时按建议拒绝"
     : result.outcome === "allowed"
     ? result.humanOverride ? "人工放行" : "审核通过"
