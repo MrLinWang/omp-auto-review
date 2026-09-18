@@ -19,6 +19,20 @@ export interface ReviewRequest {
   history: unknown[];
 }
 
+/** Fixed local diagnostics: provider errors must never be echoed as preparation failures. */
+export const preparationReasons = {
+  model_not_configured: "审核模型未配置或配置无效，需人工确认",
+  operation_too_large: "完整操作超出模型审核预算，需人工确认",
+  missing_user_context: "缺少用户任务上下文，需人工确认",
+  user_instruction_too_large: "用户指令超出上下文预算，需人工确认",
+} as const;
+export type PreparationErrorCode = keyof typeof preparationReasons;
+
+/** Thrown before any provider call; only `code` is trusted, never the message. */
+export class ReviewPreparationError extends Error {
+  constructor(readonly code: PreparationErrorCode) { super(preparationReasons[code]); }
+}
+
 export const REVIEW_PROMPT = `你是独立的工具执行审核员，只审核，不执行工具。输出一个 JSON 对象，不要 Markdown。
 格式：{"decision":"allow|deny|ask","risk":"low|medium|high|critical","authorization":"explicit|implicit|none|unclear","reason":"简短中文理由"}。
 当 decision 为 ask 时，额外提供 recommendation：{"action":"approve|deny","reason":"简短中文推荐理由"}。approve 表示建议用户明确批准本次调用，deny 表示建议拒绝本次调用并先补充信息或调整操作。仅当操作范围和后果清楚、符合用户目标、只是需要用户确认时建议 approve；副作用未知、关键信息缺失或明显越权时建议 deny。推荐只是供用户决策，不构成授权，不改变 ask，不要把建议写成用户已经批准。其他 decision 不需要 recommendation。
@@ -73,12 +87,12 @@ function historyItem(entry: unknown): { source: string; content: unknown } | und
 
 export function buildReviewData(request: ReviewRequest, config: ReviewConfig): string {
   const rawOperation = JSON.stringify(request.operation);
-  if (Buffer.byteLength(rawOperation) > config.maxOperationBytes) throw new Error("完整操作超出模型审核预算，需人工确认");
+  if (Buffer.byteLength(rawOperation) > config.maxOperationBytes) throw new ReviewPreparationError("operation_too_large");
   const history = request.history.map(historyItem).filter((x): x is NonNullable<typeof x> => Boolean(x));
   const latestUser = history.findLast(x => x.source === "user_message" || x.source === "ancestor_user_message");
-  if (!latestUser || !latestUser.content) throw new Error("缺少用户任务上下文，需人工确认");
+  if (!latestUser || !latestUser.content) throw new ReviewPreparationError("missing_user_context");
   const redactedUser = redactValue(latestUser);
-  if (Buffer.byteLength(JSON.stringify(redactedUser)) > config.maxContextBytes / 2) throw new Error("用户指令超出上下文预算，需人工确认");
+  if (Buffer.byteLength(JSON.stringify(redactedUser)) > config.maxContextBytes / 2) throw new ReviewPreparationError("user_instruction_too_large");
   const selected: unknown[] = [];
   let remaining = config.maxContextBytes - Buffer.byteLength(JSON.stringify(redactedUser)) - 256;
   for (const item of history.filter(x => x !== latestUser).slice(-24).reverse()) {

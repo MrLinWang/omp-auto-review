@@ -2,6 +2,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { redactValue } from "./privacy.ts";
 import type { ReviewAttempt } from "./attempt.ts";
+import type { PreparationErrorCode } from "./reviewer.ts";
 
 export interface AuditRecord {
   timestamp: string;
@@ -16,6 +17,8 @@ export interface AuditRecord {
   /** Exact additional rule or stable preset rule identifiers; no raw compound command. */
   bypassRule?: string;
   attempts?: ReviewAttempt[];
+  /** Local preparation failed before any model attempt; `model` is null. */
+  preflightError?: PreparationErrorCode;
   decision: "allow" | "deny" | "ask" | "error";
   reason: string;
   recommendation?: { action: "approve" | "deny"; reason: string };

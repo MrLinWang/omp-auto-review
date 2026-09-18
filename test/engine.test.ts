@@ -29,6 +29,7 @@ test("failed fallback chain shows and audits the last model and each failure", a
     });
     assert.equal((await f.engine.handle(call(), c.ctx))?.block, true);
     assert.equal(f.records[0].model, "test/backup");
+    assert.equal(f.records[0].preflightError, undefined);
     assert.deepEqual(f.records[0].attempts?.map(attempt => attempt.status), ["invalid_response", "output_limit"]);
   } finally { await w.cleanup(); }
 });

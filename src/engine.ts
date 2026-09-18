@@ -4,7 +4,7 @@ import type { AuditRecord } from "./audit.ts";
 import type { ReviewLogRecord } from "./review-log.ts";
 import { classify, type ToolCall, type ToolSource } from "./policy.ts";
 import { canonical, fingerprint, redact, safeText } from "./privacy.ts";
-import type { ReviewRequest, Verdict } from "./reviewer.ts";
+import { preparationReasons, ReviewPreparationError, type ReviewRequest, type Verdict } from "./reviewer.ts";
 import { authorityFingerprint } from "./context.ts";
 import type { ReviewResult } from "./status.ts";
 import { selectConfirmation } from "./confirmation.ts";
@@ -81,14 +81,19 @@ export class ReviewEngine {
     let recommendation: Verdict["recommendation"];
     let model: string | null = null;
     let fallbackUsed = false;
+    let preflightError: AuditRecord["preflightError"];
     const attempts: ReviewAttempt[] = [];
     try {
-      snapshot = JSON.parse(canonical(event)) as ToolCall;
-      hash = fingerprint({ sessionId, cwd, operation: snapshot });
       let config: ReviewConfig;
-      // Invalid configuration must fail closed: no reviewer model and no Bash bypass.
+      // Invalid configuration must fail closed: no reviewer model, no Bash bypass,
+      // and no `enabled: false` — a broken file never turns review off.
       try { config = this.deps.config(); }
       catch { config = { fallbackModels: [], bashBypassEnabled: false, bashAllowCommands: [], reviewTimeoutMs: 20_000, confirmationTimeoutMs: 90_000, maxOperationBytes: 32_768, maxContextBytes: 24_576 }; }
+      // The master switch wins before any policy, history or UI work; a disabled plugin
+      // returns the call exactly as typed. Invalid configs never reach it and stay reviewed.
+      if (config.enabled === false) return undefined;
+      snapshot = JSON.parse(canonical(event)) as ToolCall;
+      hash = fingerprint({ sessionId, cwd, operation: snapshot });
       const policy = await classify(snapshot, cwd, this.deps.sources().find(t => t.name === event.toolName), this.deps.protectedRoots,
         config.bashAllowCommands, config.bashReadonlyPreset ?? "common", config.bashBypassEnabled ?? true);
       if (controller.signal.aborted) return { block: true, reason: "审核会话已取消" };
@@ -129,7 +134,7 @@ export class ReviewEngine {
       let acceptingAttempts = true;
       let attemptStarted = Date.now();
       try {
-        if (!config.model) throw new Error("审核模型未配置或配置无效");
+        if (!config.model) throw new ReviewPreparationError("model_not_configured");
         const verdict = await withSignal(this.deps.review({
           operation: snapshot, cwd, trigger: policy.reason, history,
         }, config, ctx, reviewController.signal, attempt => {
@@ -149,14 +154,22 @@ export class ReviewEngine {
         if (verdict.decision === "ask" && verdict.recommendation) {
           recommendation = { action: verdict.recommendation.action, reason: redact(verdict.recommendation.reason) };
         }
-      } catch {
+      } catch (error) {
         const pending = attempts.at(-1);
         if (pending && (pending.status === "running" || pending.status === "cancelled")) {
           pending.status = controller.signal.aborted ? "cancelled" : reviewController.signal.aborted ? "timeout" : "call_error";
           pending.elapsedMs = Date.now() - attemptStarted;
         }
-        reason = config.model ? "审核模型调用失败、超时或响应无效，需人工确认" : "审核模型未配置或配置无效，需人工确认";
-        if (attempts.length) reason = `未获得有效审核结论，需人工确认。尝试结果：${formatAttempts(attempts)}`;
+        // Local preparation failures carry a fixed reason and never claim an attempt;
+        // anything else keeps the call-failure summary and the per-attempt diagnostics.
+        if (error instanceof ReviewPreparationError && !attempts.length) {
+          preflightError = error.code;
+          model = null;
+          reason = preparationReasons[preflightError];
+        } else {
+          reason = "审核模型调用失败、超时或响应无效，需人工确认";
+          if (attempts.length) reason = `未获得有效审核结论，需人工确认。尝试结果：${formatAttempts(attempts)}`;
+        }
       } finally {
         acceptingAttempts = false;
         clearTimeout(timer);
@@ -171,6 +184,7 @@ export class ReviewEngine {
         await withSignal(this.deps.reviewLog(config.reviewLogPath, {
           timestamp: new Date().toISOString(), sessionId, cwd, operation: snapshot,
           model, fallbackUsed, decision, reason, recommendation,
+          ...(preflightError ? { preflightError } : {}),
           ...(attempts.length ? { attempts: attempts.map(attempt => ({ ...attempt })) } : {}),
         }), controller.signal);
       }
@@ -197,8 +211,10 @@ export class ReviewEngine {
               // Name a backup by comparing the last attempted model with the configured primary:
               // counting attempts would also fire when the primary itself was retried.
               const lastModel = attempts.at(-1)?.model;
+              const modelLine = preflightError ? "审核模型：未调用"
+                : `${decision === "error" ? "最后尝试模型" : "审核模型"}：${model}${fallbackUsed || (lastModel !== undefined && lastModel !== config.model) ? "（备用）" : ""}`;
               const result = await selectConfirmation(ctx, safeText(
-                `自动审核：${decision}\n${decision === "error" ? "最后尝试模型" : "审核模型"}：${model}${fallbackUsed || (lastModel !== undefined && lastModel !== config.model) ? "（备用）" : ""}\n原因：${reason}${advice}${countdown}\n工作目录：${cwd}\n工具：${snapshot.toolName}\n调用：${snapshot.toolCallId}\n${operationText}`,
+                `自动审核：${decision}\n${modelLine}\n原因：${reason}${advice}${countdown}\n工作目录：${cwd}\n工具：${snapshot.toolName}\n调用：${snapshot.toolCallId}\n${operationText}`,
               ), controller.signal, timeout, delay, recommendation?.action);
               if (controller.signal.aborted || Date.now() >= deadline) return false;
               automaticRecommendation = result === "recommendation";
@@ -216,7 +232,7 @@ export class ReviewEngine {
       await withSignal(this.deps.audit({
         timestamp: new Date().toISOString(), sessionId, toolCallId: snapshot.toolCallId, toolName: snapshot.toolName,
         operationHash: hash, parameterSummary: { keys: Object.keys(snapshot.input), bytes: Buffer.byteLength(canonical(snapshot.input)) },
-        model, ...(attempts.length ? { attempts } : {}), ...(fallbackUsed ? { fallbackUsed: true } : {}), decision, reason, ...(recommendation ? { recommendation } : {}), outcome, humanOverride, ...(automaticRecommendation ? { automaticRecommendation: true } : {}), elapsedMs: Date.now() - started,
+        model, ...(preflightError ? { preflightError } : {}), ...(attempts.length ? { attempts } : {}), ...(fallbackUsed ? { fallbackUsed: true } : {}), decision, reason, ...(recommendation ? { recommendation } : {}), outcome, humanOverride, ...(automaticRecommendation ? { automaticRecommendation: true } : {}), elapsedMs: Date.now() - started,
       }), controller.signal);
       // Audit I/O can yield; re-check cancellation and mutation after it too.
       if (controller.signal.aborted || authorizationChanged() || ctx.sessionManager.getSessionId() !== sessionId || ctx.cwd !== cwd ||
@@ -236,7 +252,7 @@ export class ReviewEngine {
     } finally {
       // Only reviews that ran on a still-current call are reported.
       if (reviewed && snapshot && !controller.signal.aborted && ctx.sessionManager.getSessionId() === sessionId && ctx.cwd === cwd) {
-        try { this.deps.onResult?.(snapshot, { decision, outcome, humanOverride, ...(fallbackUsed ? { fallbackUsed: true, model } : {}), ...(automaticRecommendation ? { automaticRecommendation: true } : {}) }, ctx); }
+        try { this.deps.onResult?.(snapshot, { decision, outcome, humanOverride, ...(preflightError ? { preflightError } : {}), ...(fallbackUsed ? { fallbackUsed: true, model } : {}), ...(automaticRecommendation ? { automaticRecommendation: true } : {}) }, ctx); }
         catch { /* Status rendering must not change an approval decision. */ }
       }
       if (overallTimer) clearTimeout(overallTimer);

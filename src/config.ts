@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { normalizeBashCommand, readonlyBashCommand } from "./bash-rules.ts";
 
 export interface ReviewConfig {
+  /** Master switch; omitted in older configurations means enabled. */
+  enabled?: boolean;
   model?: string;
   /** Optional JSONL file; relative paths resolve against the user agent directory. */
   reviewLogPath?: string;
@@ -25,6 +27,7 @@ export interface ReviewConfig {
 }
 
 export const defaults: Readonly<ReviewConfig> = Object.freeze({
+  enabled: true,
   fallbackModels: [],
   bashBypassEnabled: true,
   bashReadonlyPreset: "common",
@@ -46,6 +49,10 @@ export function parseConfig(value: unknown): ReviewConfig {
   for (const key of Object.keys(obj)) if (!known.has(key)) throw new Error(`未知配置字段：${key}`);
   // Never share the default array: callers may mutate the parsed result.
   const result = { ...defaults, fallbackModels: [] as string[], bashAllowCommands: [] as string[] };
+  if (obj.enabled !== undefined) {
+    if (typeof obj.enabled !== "boolean") throw new Error("enabled 必须为布尔值");
+    result.enabled = obj.enabled;
+  }
   if (obj.bashBypassEnabled !== undefined) {
     if (typeof obj.bashBypassEnabled !== "boolean") throw new Error("bashBypassEnabled 必须为布尔值");
     result.bashBypassEnabled = obj.bashBypassEnabled;

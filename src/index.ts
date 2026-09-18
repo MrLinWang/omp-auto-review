@@ -34,6 +34,8 @@ export default function autoReview(pi: ExtensionAPI): void {
   });
 
   const status = (ctx: ExtensionContext): string => {
+    if (configError) return "未就绪：配置无效";
+    if (config.enabled === false) return "已关闭";
     let ready = false;
     if (config.model) {
       // Any resolvable candidate counts: the primary may be missing while a backup still runs.
@@ -50,7 +52,7 @@ export default function autoReview(pi: ExtensionAPI): void {
   const showStatus = (ctx: ExtensionContext): void => {
     const message = statusLine(ctx);
     ctx.ui.setStatus("auto-review", message);
-    if (ctx.hasUI) ctx.ui.notify(message, configError || !config.model ? "warning" : "info");
+    if (ctx.hasUI) ctx.ui.notify(message, configError || (config.enabled !== false && !config.model) ? "warning" : "info");
     else pi.logger.info(message);
   };
   const load = async (ctx: ExtensionContext): Promise<void> => {

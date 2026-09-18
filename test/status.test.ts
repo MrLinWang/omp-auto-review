@@ -8,6 +8,8 @@ test("status distinguishes review results and human override", () => {
   assert.equal(reviewStatus(operation, { decision: "allow", outcome: "allowed", humanOverride: false }), "审核通过 · bash: npm test");
   assert.match(reviewStatus(operation, { decision: "deny", outcome: "blocked", humanOverride: false }), /^审核拒绝/);
   assert.match(reviewStatus(operation, { decision: "error", outcome: "blocked", humanOverride: false }), /^审核异常，已阻止/);
+  assert.match(reviewStatus(operation, { decision: "error", outcome: "blocked", humanOverride: false, preflightError: "missing_user_context" }), /^审核条件不足，已阻止/);
+  assert.match(reviewStatus(operation, { decision: "error", outcome: "allowed", humanOverride: true, preflightError: "missing_user_context" }), /^人工放行/);
   assert.match(reviewStatus(operation, { decision: "ask", outcome: "blocked", humanOverride: false }), /^未放行/);
   assert.match(reviewStatus(operation, { decision: "deny", outcome: "allowed", humanOverride: true }), /^人工放行/);
   assert.match(reviewStatus(operation, { decision: "allow", outcome: "blocked", humanOverride: false }), /^未放行/);

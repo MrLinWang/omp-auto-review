@@ -1,13 +1,13 @@
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ReviewConfig } from "./config.ts";
-import { buildReviewData, parseVerdict, REVIEW_PROMPT, type ReviewRequest, type Verdict } from "./reviewer.ts";
+import { buildReviewData, parseVerdict, REVIEW_PROMPT, ReviewPreparationError, type ReviewRequest, type Verdict } from "./reviewer.ts";
 import { reviewReasoning } from "./thinking.ts";
 import { reviewWithFallback } from "./fallback.ts";
 import { ReviewAttemptError, type AttemptObserver } from "./attempt.ts";
 
 export async function reviewWithModel(request: ReviewRequest, config: ReviewConfig, ctx: ExtensionContext, signal: AbortSignal, onAttempt?: AttemptObserver): Promise<Verdict> {
-  if (!config.model) throw new Error("尚未配置审核模型");
+  if (!config.model) throw new ReviewPreparationError("model_not_configured");
   const content = buildReviewData(request, config);
   // The chain is built once per call: primary first, then the configured backups in order.
   const candidates = [config.model, ...(config.fallbackModels ?? [])];

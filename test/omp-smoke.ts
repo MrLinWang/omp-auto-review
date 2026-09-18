@@ -15,7 +15,7 @@ try {
   await mkdir(runtimePackage);
   await cp(join(repo, "src"), join(runtimePackage, "src"), { recursive: true });
   await cp(join(repo, "package.json"), join(runtimePackage, "package.json"));
-  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail", "retry-invalid", "retry-timeout", "retry-exhausted", "bypass-pwd", "bypass-git", "bypass-git-filter", "bypass-disabled", "bypass-compound", "bypass-safe-compound", "bypass-text", "bypass-extras", "bypass-off-empty", "bypass-native-deny"])) {
+  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "preflight-context-budget", "preflight-operation-budget", "disabled", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail", "retry-invalid", "retry-timeout", "retry-exhausted", "bypass-pwd", "bypass-git", "bypass-git-filter", "bypass-disabled", "bypass-compound", "bypass-safe-compound", "bypass-text", "bypass-extras", "bypass-off-empty", "bypass-native-deny"])) {
     const cwd = join(root, scenario, "work"), agentDir = join(root, scenario, "agent");
     await mkdir(cwd, { recursive: true });
     if (scenario.startsWith("bypass-")) {
@@ -50,6 +50,10 @@ task:
     await writeFile(join(agentDir, "agents", "review-child.md"), "---\nname: review-child\ndescription: Isolated smoke child\nmodel: review-test/child\n---\nRun one bash command then yield.\n");
     if (scenario !== "missing") await writeFile(join(agentDir, "auto-review.json"), JSON.stringify({
       model: scenario === "fallback-missing" ? "review-test/missing" : "review-test/reviewer",
+      ...(scenario === "preflight-context-budget" ? { maxContextBytes: 1, reviewLogPath: "reviews.jsonl" } : {}),
+      ...(scenario === "preflight-operation-budget" ? { maxOperationBytes: 1, reviewLogPath: "reviews.jsonl" } : {}),
+      // The switch is a config value here; a reviewer that would deny proves it was never asked.
+      ...(scenario === "disabled" ? { enabled: false, reviewLogPath: "reviews.jsonl" } : {}),
       ...(scenario === "bypass-disabled" ? { bashBypassEnabled: false } : {}),
       ...(scenario === "bypass-extras" ? { bashReadonlyPreset: "off", bashAllowCommands: ["pwd -P"] } : {}),
       ...(scenario === "bypass-off-empty" ? { bashReadonlyPreset: "off", bashAllowCommands: [] } : {}),
@@ -86,13 +90,32 @@ task:
     assert.equal(result.code, 0, `${scenario}: omp failed\n${result.output.slice(-6000)}`);
     assert.ok(result.output.includes("SMOKE_DONE"), `${scenario}: main agent did not finish\n${result.output.slice(-4000)}`);
     const marker = await access(join(cwd, "marker.txt")).then(() => true, () => false);
-    assert.equal(marker, ["allow", "tui-approve", "tui-auto-approve", "fallback-invalid", "fallback-timeout", "fallback-missing", "retry-invalid", "retry-timeout", "retry-exhausted"].includes(scenario), `${scenario}: unexpected command execution`);
+    assert.equal(marker, ["allow", "disabled", "tui-approve", "tui-auto-approve", "fallback-invalid", "fallback-timeout", "fallback-missing", "retry-invalid", "retry-timeout", "retry-exhausted"].includes(scenario), `${scenario}: unexpected command execution`);
     const events = (await readFile(trace, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
     const auditDir = join(agentDir, "auto-review", "audit");
     const auditFiles = await readdir(auditDir).catch(() => []);
     const audit = (await Promise.all(auditFiles.map(file => readFile(join(auditDir, file), "utf8")))).join("");
     if (["allow", "deny", "invalid"].includes(scenario)) assert.ok(events.some(e => e.role === "review" && e.tool === "bash"), "review model was not called");
-    if (!["native-deny", "bypass-native-deny"].includes(scenario)) assert.ok(audit.includes('"toolName":"bash"') || scenario === "child", "audit missing");
+    if (!["native-deny", "bypass-native-deny", "disabled"].includes(scenario)) assert.ok(audit.includes('"toolName":"bash"') || scenario === "child", "audit missing");
+    if (scenario === "disabled") {
+      assert.ok(!events.some(event => event.role === "review"), "disabled review still called the model");
+      assert.equal(audit, "", "disabled review wrote an audit record");
+      assert.equal(await access(join(agentDir, "reviews.jsonl")).then(() => true, () => false), false, "disabled review wrote the review log");
+    }
+    if (scenario.startsWith("preflight-")) {
+      assert.ok(!events.some(event => event.role === "review"), "preparation failure invoked the reviewer");
+      const record = audit.trim().split("\n").map(line => JSON.parse(line)).find(record => record.toolName === "bash");
+      const code = scenario === "preflight-context-budget" ? "user_instruction_too_large" : "operation_too_large";
+      assert.equal(record.preflightError, code);
+      assert.equal(record.decision, "error");
+      assert.equal(record.model, null);
+      assert.equal(record.attempts, undefined);
+      const logged = JSON.parse((await readFile(join(agentDir, "reviews.jsonl"), "utf8")).trim());
+      assert.equal(logged.preflightError, code);
+      assert.equal(logged.model, null);
+      assert.equal(logged.reason, record.reason);
+      assert.ok(result.output.includes(record.reason), "tool error lost preparation reason");
+    }
     if (["bypass-pwd", "bypass-git", "bypass-safe-compound", "bypass-text", "bypass-extras"].includes(scenario)) {
       assert.ok(!events.some(event => event.role === "review"), "bypass invoked reviewer");
       assert.ok(audit.includes('"bypassRule":'), "bypass audit missing");

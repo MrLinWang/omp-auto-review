@@ -25,6 +25,8 @@ export interface ReviewLogRecord {
   recommendation?: AuditRecord["recommendation"];
   /** Per-model attempts, present only when a model call was started. */
   attempts?: AuditRecord["attempts"];
+  /** Local preparation failure; recorded with `model: null` and no attempts. */
+  preflightError?: AuditRecord["preflightError"];
 }
 
 /** Appends one record; `path` resolves against the user agent directory and its parent directory is created on demand. */

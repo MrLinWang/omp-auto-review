@@ -1,4 +1,5 @@
 {
+  "enabled": true,
   "model": "YOUR_PROVIDER/YOUR_MODEL_ID",
   "fallbackModels": [],
   "bashBypassEnabled": true,
