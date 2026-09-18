@@ -1,6 +1,6 @@
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { hasGitFilters, matchBashRule } from "./bash-rules.ts";
+import { hasGitFilters, matchBashRule, matchCommonBashRule } from "./bash-rules.ts";
 
 export interface ToolCall { toolName: string; toolCallId: string; input: Record<string, unknown> }
 export interface ToolSource { name: string; sourceInfo?: { source: string; path?: string } }
@@ -9,7 +9,7 @@ export interface Classification {
   reason: string;
   /** Set with `bypassRule` when a read-only Bash rule matched: the hardened command to execute. */
   bashCommand?: string;
-  /** The configured rule that matched, recorded in the audit record. */
+  /** The additional rule or stable preset identifiers recorded in the audit. */
   bypassRule?: string;
 }
 
@@ -42,6 +42,17 @@ function sensitive(path: string): boolean {
     /^(?:\.git|\.omp|\.pi|\.codex|\.agents|\.claude|\.ssh|\.aws|\.azure|\.kube|\.gnupg|\.config|\.npmrc|\.netrc|\.pypirc)$/i.test(part) ||
     /^(?:\.env(?:\..*)?|AGENTS\.md|CLAUDE\.md|GEMINI\.md|auto-review\.json|auth\.json|credentials(?:\..*)?|id_(?:rsa|ed25519|ecdsa)(?:\.pub)?)$/i.test(part) ||
     /\.(?:pem|key|p12|pfx)$/i.test(part));
+}
+
+/** Shared by native tools and Bash reads; check both lexical and symlink-resolved paths. */
+export async function checkedTarget(path: string, cwd: string, protectedRoots: string[]): Promise<string> {
+  const root = await realpath(cwd);
+  const target = await resolveTarget(path, cwd);
+  if (sensitive(resolve(cwd, path)) || sensitive(target)) throw new Error("敏感路径");
+  const protectedPaths = await Promise.all(protectedRoots.map(p => resolveTarget(p, cwd)));
+  if (protectedPaths.some(p => inside(p, target))) throw new Error("审核插件或其配置目录");
+  if (!inside(root, target)) throw new Error("目标位于工作目录之外");
+  return target;
 }
 
 // Only recognize complete, conservative subsets of native edit grammars.
@@ -79,7 +90,7 @@ export function editTargets(input: Record<string, unknown>): string[] | undefine
   return undefined;
 }
 
-export async function classify(call: ToolCall, cwd: string, source: ToolSource | undefined, protectedRoots: string[], bashAllowCommands: readonly string[] = []): Promise<Classification> {
+export async function classify(call: ToolCall, cwd: string, source: ToolSource | undefined, protectedRoots: string[], bashAllowCommands: readonly string[] = [], bashReadonlyPreset: "common" | "off" = "off", bashBypassEnabled = true): Promise<Classification> {
   const review = (reason: string): Classification => ({ review: true, reason });
   if (source?.sourceInfo?.source !== "builtin" || source.sourceInfo.path !== `<builtin:${call.toolName}>`) {
     return review("非已知内置工具、已被扩展覆盖或来源不明");
@@ -87,10 +98,24 @@ export async function classify(call: ToolCall, cwd: string, source: ToolSource |
   let paths: string[];
   const input = call.input;
   if (call.toolName === "bash") {
-    // A match never runs the typed command: matchBashRule returns the hardened rewrite.
+    if (!bashBypassEnabled) return review("Bash 免审总开关已关闭");
+    // A match never runs the typed command: both matchers return a hardened rewrite.
     // Repository clean/process filters keep the call reviewed, since the query would run them.
-    const match = matchBashRule(input, bashAllowCommands);
-    if (match && match.command.includes("--no-optional-locks") && await hasGitFilters(cwd)) {
+    const match = bashReadonlyPreset === "common" ? await matchCommonBashRule(input, bashAllowCommands, {
+      path: async (path, kind) => {
+        const target = await checkedTarget(path, cwd, protectedRoots);
+        const info = await stat(target);
+        if (!info.isFile() && !(kind === "metadata" && info.isDirectory())) throw new Error("非普通文件或目录");
+        return target;
+      },
+      cwd: async path => {
+        const root = await realpath(cwd);
+        if (await resolveTarget(path, cwd) !== root) throw new Error("不是会话工作目录");
+        return root;
+      },
+    }) : matchBashRule(input, bashAllowCommands);
+    const git = match && ("git" in match ? match.git : match.command.includes("--no-optional-locks"));
+    if (git && await hasGitFilters(cwd)) {
       return review("Git 配置含过滤器或无法可靠检查，仍需模型审核");
     }
     return match ? { review: false, reason: "命中只读 Bash 免审规则", bashCommand: match.command, bypassRule: match.rule }
@@ -111,14 +136,12 @@ export async function classify(call: ToolCall, cwd: string, source: ToolSource |
   } else return review("执行、外部操作或未列入免审范围的工具");
 
   try {
-    const root = await realpath(cwd);
-    const protectedPaths = await Promise.all(protectedRoots.map(p => resolveTarget(p, cwd)));
     for (const path of paths) {
-      const target = await resolveTarget(path, cwd);
-      if (sensitive(resolve(cwd, path)) || sensitive(target)) return review("敏感路径");
-      if (protectedPaths.some(p => inside(p, target))) return review("审核插件或其配置目录");
-      if (!inside(root, target)) return review("目标位于工作目录之外");
+      await checkedTarget(path, cwd, protectedRoots);
     }
     return { review: false, reason: "已知内置读取或工作目录内普通编辑" };
-  } catch { return review("目标路径无法可靠解析"); }
+  } catch (error) {
+    const reason = error instanceof Error && ["敏感路径", "审核插件或其配置目录", "目标位于工作目录之外"].includes(error.message) ? error.message : "目标路径无法可靠解析";
+    return review(reason);
+  }
 }

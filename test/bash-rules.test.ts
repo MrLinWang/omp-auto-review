@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, writeFile, access } from "node:fs/promises";
 import { join } from "node:path";
-import { DEFAULT_BASH_ALLOW_COMMANDS, matchBashRule, readonlyBashCommand, hasGitFilters } from "../src/bash-rules.ts";
+import { matchBashRule, readonlyBashCommand, hasGitFilters } from "../src/bash-rules.ts";
 import { parseConfig, defaults } from "../src/config.ts";
 import { classify } from "../src/policy.ts";
 import { ReviewEngine } from "../src/engine.ts";
@@ -12,14 +12,16 @@ import type { AuditRecord } from "../src/audit.ts";
 import { builtin, call, context, workspace } from "./helpers.ts";
 
 test("full-command rules are configurable and validate the supported query grammar", () => {
-  assert.deepEqual(parseConfig({}).bashAllowCommands, DEFAULT_BASH_ALLOW_COMMANDS);
+  assert.deepEqual(parseConfig({}).bashAllowCommands, []);
   assert.deepEqual(parseConfig({ bashAllowCommands: [] }).bashAllowCommands, []);
   assert.deepEqual(parseConfig({ bashAllowCommands: ["git  status --short", "git status --short", "git diff --cached --stat"] }).bashAllowCommands,
     ["git status --short", "git diff --cached --stat"]);
   for (const rules of [null, "pwd", ["git *"], ["rm -f a"], ["git diff"], ["cat .env"], ["pwd; whoami"], [12], Array(65).fill("pwd")]) {
     assert.throws(() => parseConfig({ bashAllowCommands: rules }));
   }
-  for (const command of DEFAULT_BASH_ALLOW_COMMANDS) assert.ok(matchBashRule({ command }, DEFAULT_BASH_ALLOW_COMMANDS));
+  // Spellings from the pre-preset default list must still validate as additional rules.
+  const legacy = ["pwd", "git --version", "git status", "git status --short", "git status --porcelain=v1", "git diff --stat", "git diff --name-only"];
+  for (const command of legacy) assert.ok(matchBashRule({ command }, legacy));
   assert.equal(matchBashRule({ command: "git status --branch" }, ["git status"]), undefined);
   assert.equal(matchBashRule({ command: "pwd" }, []), undefined);
 });
@@ -42,7 +44,7 @@ test("bypassed calls are rewritten, audited and never invoke the model; failures
     let reviews = 0;
     const records: AuditRecord[] = [];
     const makeEngine = (audit: (record: AuditRecord) => Promise<void>, commands: readonly string[] = ["pwd"]) => new ReviewEngine({
-      config: () => ({ ...defaults, model: "test/reviewer", bashAllowCommands: commands }),
+      config: () => ({ ...defaults, model: "test/reviewer", bashReadonlyPreset: "off", bashAllowCommands: commands }),
       sources: () => [builtin("bash")], protectedRoots: [w.cwd],
       review: async () => { reviews++; return { decision: "deny", risk: "low", authorization: "implicit", reason: "test" }; },
       audit,

@@ -15,12 +15,13 @@ try {
   await mkdir(runtimePackage);
   await cp(join(repo, "src"), join(runtimePackage, "src"), { recursive: true });
   await cp(join(repo, "package.json"), join(runtimePackage, "package.json"));
-  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail", "retry-invalid", "retry-timeout", "retry-exhausted", "bypass-pwd", "bypass-git", "bypass-git-filter", "bypass-disabled", "bypass-compound", "bypass-native-deny"])) {
+  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail", "retry-invalid", "retry-timeout", "retry-exhausted", "bypass-pwd", "bypass-git", "bypass-git-filter", "bypass-disabled", "bypass-compound", "bypass-safe-compound", "bypass-text", "bypass-extras", "bypass-off-empty", "bypass-native-deny"])) {
     const cwd = join(root, scenario, "work"), agentDir = join(root, scenario, "agent");
     await mkdir(cwd, { recursive: true });
     if (scenario.startsWith("bypass-")) {
       await promisify(execFile)("git", ["init", "--quiet", cwd]);
-      await writeFile(join(cwd, "visible.txt"), "test\n");
+      // A unique payload lets the text scenario prove its pipeline ran, not just any output.
+      await writeFile(join(cwd, "visible.txt"), scenario === "bypass-text" ? "pipeline-token-42\n" : "test\n");
       if (scenario === "bypass-git-filter") await promisify(execFile)("git", ["-C", cwd, "config", "filter.probe.clean", "touch filter-ran"]);
     }
     await mkdir(join(agentDir, "agents"), { recursive: true });
@@ -49,7 +50,10 @@ task:
     await writeFile(join(agentDir, "agents", "review-child.md"), "---\nname: review-child\ndescription: Isolated smoke child\nmodel: review-test/child\n---\nRun one bash command then yield.\n");
     if (scenario !== "missing") await writeFile(join(agentDir, "auto-review.json"), JSON.stringify({
       model: scenario === "fallback-missing" ? "review-test/missing" : "review-test/reviewer",
-      ...(scenario === "bypass-disabled" ? { bashAllowCommands: [] } : {}),
+      ...(scenario === "bypass-disabled" ? { bashBypassEnabled: false } : {}),
+      ...(scenario === "bypass-extras" ? { bashReadonlyPreset: "off", bashAllowCommands: ["pwd -P"] } : {}),
+      ...(scenario === "bypass-off-empty" ? { bashReadonlyPreset: "off", bashAllowCommands: [] } : {}),
+      ...(scenario === "bypass-text" ? { bashAllowCommands: [] } : {}),
       ...(scenario.startsWith("fallback-") ? { fallbackModels: ["review-test/backup"], reviewTimeoutMs: 2000 } : {}),
       ...(scenario.startsWith("retry-") ? { fallbackModels: ["review-test/backup"], reviewTimeoutMs: 3000, modelTimeoutMs: 300, retryCount: 1, retryDelayMs: 20 } : {}),
       ...(scenario.startsWith("tui-auto-") ? { recommendationTimeoutMs: 1000 } : {}),
@@ -89,7 +93,7 @@ task:
     const audit = (await Promise.all(auditFiles.map(file => readFile(join(auditDir, file), "utf8")))).join("");
     if (["allow", "deny", "invalid"].includes(scenario)) assert.ok(events.some(e => e.role === "review" && e.tool === "bash"), "review model was not called");
     if (!["native-deny", "bypass-native-deny"].includes(scenario)) assert.ok(audit.includes('"toolName":"bash"') || scenario === "child", "audit missing");
-    if (["bypass-pwd", "bypass-git"].includes(scenario)) {
+    if (["bypass-pwd", "bypass-git", "bypass-safe-compound", "bypass-text", "bypass-extras"].includes(scenario)) {
       assert.ok(!events.some(event => event.role === "review"), "bypass invoked reviewer");
       assert.ok(audit.includes('"bypassRule":'), "bypass audit missing");
       assert.ok(audit.includes('"model":null'), "bypass claimed a model review");
@@ -98,11 +102,13 @@ task:
       assert.ok(result.output.includes("visible.txt"), "git query did not execute");
       assert.ok(result.output.includes("--no-pager"), "git query was not hardened");
     }
+    if (scenario === "bypass-text") assert.ok(result.output.includes("pipeline-token-42"), "text pipeline did not execute");
+    if (scenario === "bypass-safe-compound") assert.ok(result.output.includes("--no-pager"), "compound Git query was not hardened");
     if (scenario === "bypass-native-deny") {
       assert.ok(!result.output.includes("visible.txt"), "bypass ignored native deny");
       assert.ok(!events.some(event => event.role === "review"), "native deny should short-circuit review");
     }
-    if (["bypass-disabled", "bypass-compound"].includes(scenario)) assert.ok(events.some(event => event.role === "review"), "non-exempt command skipped reviewer");
+    if (["bypass-disabled", "bypass-compound", "bypass-off-empty"].includes(scenario)) assert.ok(events.some(event => event.role === "review"), "non-exempt command skipped reviewer");
     if (scenario === "bypass-git-filter") {
       assert.ok(events.some(event => event.role === "review"), "configured Git filter skipped reviewer");
       assert.ok(!audit.includes('"bypassRule":'), "filtered repository incorrectly exempted");

@@ -10,7 +10,7 @@ import { reviewWithFallback } from "../src/fallback.ts";
 import { ReviewAttemptError } from "../src/attempt.ts";
 
 // These tests exercise model review; bypass behavior has dedicated coverage.
-const defaults = { ...configDefaults, bashAllowCommands: [] };
+const defaults = { ...configDefaults, bashBypassEnabled: false };
 const allow: Verdict = { decision: "allow", risk: "low", authorization: "implicit", reason: "任务范围内" };
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 test("failed fallback chain shows and audits the last model and each failure", async () => {

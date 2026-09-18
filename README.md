@@ -52,7 +52,9 @@ extensionHandlers:
 | --- | --- | --- |
 | `model` | 未设置 | 完整 `provider/model`，精确匹配 |
 | `reviewLogPath` | 未设置（关闭） | 可选审查日志文件路径，按 JSONL 追加命令参数和模型结论；相对路径基于用户级 agent 配置目录 |
-| `bashAllowCommands` | 见下方默认列表 | Bash 只读完整命令免审列表，最多 64 条；配置后替换默认列表，`[]` 关闭免审（所有 Bash 调用转为模型审核） |
+| `bashBypassEnabled` | `true` | Bash 免审唯一总开关；`false` 时所有 Bash 调用进入审核 |
+| `bashReadonlyPreset` | `common` | `common` 启用内置常用只读规则，`off` 仅使用附加规则 |
+| `bashAllowCommands` | `[]` | 最多 64 条附加完整命令规则，与预设合并；空列表不关闭预设或总开关 |
 | `fallbackModels` | `[]` | 按顺序尝试的备用审核模型，最多 8 个完整 `provider/model`；重复项会去重，不能包含主审核模型 |
 | `reviewTimeoutMs` | `20000` | 整条审核模型链的总超时，包含认证 |
 | `modelTimeoutMs` | `10000` | 单次模型调用的超时上限，实际还受剩余预算限制 |
@@ -98,44 +100,63 @@ extensionHandlers:
 
 每次模型尝试的模型名、结果类别和耗时记录在审计的 `attempts` 数组中；启用重试时另记 1 起算的 `attempt` 次数。链失败时，确认框显示最后尝试的模型，并列出各模型的失败原因（超时、模型未注册、认证失败、限流、响应格式无效、输出达到上限、响应未正常完成或接口异常）；`（备用）` 仅在最后尝试的模型不是主审核模型时显示，主模型自身重试不会触发该标记。原始接口错误和响应正文不写入诊断，避免泄露凭据。失败记录的 `model` 表示最后尝试模型；`fallbackUsed` 仍只表示备用模型成功给出了有效结论。没有开始模型尝试时不生成 `attempts`。
 
-- `/auto-review status`：显示模型、备用链、Bash 免审规则、审查日志路径、配置路径、超时、重试设置和覆盖边界。
+- `/auto-review status`：显示模型、备用链、Bash 免审总开关、预设及附加规则、审查日志路径、配置路径、超时、重试设置和覆盖边界。
 - `/auto-review model <provider/model>`：验证模型存在并保存到用户配置文件；同名模型会同时从备用链移除，凭据由 omp 管理。
+- `/auto-review bash on` / `/auto-review bash off`：保存并立即切换 Bash 免审总开关，不修改预设或附加规则；重载时取消在途审核。
 - `/auto-review reload`：重新加载配置，同时取消尚未完成的审核。
 
 配置缺失或无效时，已知普通读取/编辑仍可使用；需要审核的操作转人工确认，无交互界面则阻止。状态栏会显示未就绪。
 
 ## 审核策略
 
-已知内置 Bash 工具命中用户级只读免审列表时，不调用审核模型；其他 shell、Python 和代码执行调用仍审核。删除、移动、任务派发、浏览器、LSP、未知工具和 MCP 工具也默认审核。它们不会因为名称含 `read` 或看起来无害就免审。
+已知内置 Bash 工具在总开关开启且命中只读预设或附加规则时，不调用审核模型；其他 shell、Python 和代码执行调用仍审核。删除、移动、任务派发、浏览器、LSP、未知工具和 MCP 工具也默认审核。它们不会因为名称含 `read` 或看起来无害就免审。
 
-默认启用以下完整命令，可在用户级 `auto-review.json` 中通过 `bashAllowCommands` 替换：
+默认启用 `common` 只读预设；`bashAllowCommands` 是附加规则，不替换预设：
 
 ```json
-"bashAllowCommands": [
-  "pwd",
-  "git --version",
-  "git status",
-  "git status --short",
-  "git status --porcelain=v1",
-  "git diff --stat",
-  "git diff --name-only"
-]
+"bashBypassEnabled": true,
+"bashReadonlyPreset": "common",
+"bashAllowCommands": []
 ```
 
-第一版支持的可配置规则如下，均为完整命令匹配，不支持正则、前缀或 `git *` 通配。连续空格会归一化；参数顺序参与匹配，额外参数不匹配。
+| 总开关 | 预设 | 生效规则 |
+| --- | --- | --- |
+| `false` | 任意 | 不启用 Bash 免审，全部进入审核 |
+| `true` | `common` | 内置常用只读规则加附加完整命令规则 |
+| `true` | `off` | 仅附加完整命令规则；列表为空时没有可命中的规则 |
 
-| 命令 | 支持的参数 |
+**迁移旧配置：** 以前用 `bashAllowCommands: []` 关闭免审的配置，应改用 `bashBypassEnabled: false`。空列表现在只表示“无附加规则”。如果只想继续使用原有完整命令列表，设置 `bashReadonlyPreset: "off"`。
+
+`common` 支持以下受限形式。未知参数或任一危险分段会让整条调用回到模型审核。
+
+| 命令族 | 支持范围 |
 | --- | --- |
-| `pwd` | 无参数、`-L` 或 `-P` |
-| `git --version` | 无额外参数 |
-| `git status` | 可组合 `--short`/`-s`、`--branch`/`-b`、`--porcelain`、`--porcelain=v1`、`--porcelain=v2`、`--untracked-files=no/normal/all` |
-| `git diff` | 必须含 `--stat`、`--shortstat`、`--numstat`、`--name-only`、`--name-status` 中至少一项，可加 `--cached` 或 `--staged` |
+| `pwd`、`git --version` | `pwd` 可加 `-L` / `-P` |
+| `git status` | `--short`/`-s`、`--branch`/`-b`、`-sb`/`-bs`、`--porcelain[=v1/v2]`、`--untracked-files=no/normal/all` |
+| `git diff` | 必须含 `--stat`/`--shortstat`/`--numstat`/`--name-only`/`--name-status`，可加 `--cached`/`--staged`；不接受正文输出、ref 或路径 |
+| Git 元数据 | `log`（仅 `--oneline`、`-n N`）、无参数 `ls-files`、`branch --show-current` 或 `branch -a/-v`；不接受 ref/path |
+| 文件元数据 | `ls [-lah1td] [PATH...]`、默认输出的 `stat PATH...`；不递归 |
+| 文本读取 | `cat FILE...`、`head -n N`/`head -N`、`tail -n N`、`wc [-lc]`、`grep [-nicEF] PATTERN`、`sed -n 'Ap'`/`sed -n 'A,Bp'`，后接文件参数 |
+| 管道下游 | 上述文本命令可省略文件参数读取上游；无参数 `sort`、`uniq` 和 `uniq -c` 仅作为管道下游 |
+| 辅助 | 字面量 `echo`（无选项及反斜杠）、固定格式 `%s`/`%s\n` 的 `printf`、无参数 `true`/`:` |
 
-例如可添加 `git diff --cached --stat`；普通 `git diff` 的文件内容输出、任意文件路径、`cat`、脚本和写入命令不在支持范围。引号、换行、管道、重定向、命令替换、环境赋值、复合命令以及 Bash 的 `env/cwd/pty/async` 等执行修饰参数均继续模型审核。配置项中写入不支持的规则会校验失败；配置无效时不启用 Bash 免审。
+支持单/双引号内的字面量参数、顶层 `;`、`&&` 和 `|`。每段都必须命中内置规则或附加规则，保留原连接符的执行语义。仅支持开头的 `cd <会话 cwd> &&`，路径解析后必须与会话工作目录相同。例如：
 
-免审的 `pwd` 通过 shell 内置命令执行；Git 查询会被改写为关闭分页器、fsmonitor、可选索引写入和子模块查询的命令，差异摘要还关闭外部 diff/textconv。免审前通过本地 Git 配置检查过滤器：若配置了 `filter.*`（例如 Git LFS），或无法完成检查，状态/差异查询仍进入模型审核，防止查询触发 clean/process 外部程序。执行的完整命令可在工具调用中看到，原生审批仍针对改写后的实际命令生效。它们只显示路径或 Git 状态/差异统计，不输出文件正文，因此也可在插件工作目录查询。与其他命令一样，仍依赖可信的 shell、Git 安装及环境，不是系统沙箱。
+```bash
+git status -sb && git diff --stat | head -n 20
+cat src/example.ts | head -n 20
+sed -n '1,80p' src/example.ts
+```
 
-命中时状态栏显示“规则免审”，审计记录 `model: null` 和 `bypassRule`，记录的操作哈希对应实际执行命令。审计失败或调用被取消/变更时不放行。设置 `"bashAllowCommands": []` 可全部关闭免审，此后所有 Bash 调用都回到模型审核；修改后执行 `/auto-review reload`，通过 `/auto-review status` 查看当前列表。
+不接受换行分隔、重定向、展开、命令替换、后台执行、`||`、控制流、环境赋值、注释及不完整语法。预设最多解析 8 KiB、64 个命令段；超限转审核。`env/cwd/pty/async` 等 Bash 执行修饰字段仍需审核。文件读取必须有显式文件或上游管道，不读取来源不明的标准输入。
+
+文件参数同时检查字面路径及真实路径，要求在当前工作目录内、不属于敏感路径或插件保护目录。正文读取仅接受现有普通文件，拒绝设备、FIFO、悬空和越界符号链接；不支持递归读取。验证后的文件参数改写为绝对真实路径，因此部分命令输出中的文件名也会显示绝对路径。
+
+附加规则仍是完整命令精确匹配，最多 64 条，仅支持上述 `pwd`、`git --version`、`git status` 和 `git diff` 的受限参数语法。连续空格归一化，参数顺序参与匹配；不支持通配符、前缀、路径、脚本或复合命令作为配置规则。预设为 `common` 时附加规则可参与逐段匹配，为 `off` 时只匹配整条命令。配置非法时禁用 Bash 免审。
+
+免审执行的是验证后生成的命令。内置辅助命令使用 `builtin`，文件命令使用 `command` 并安全引用参数；Git 关闭分页器、fsmonitor、可选索引写入和子模块查询，差异统计关闭外部 diff/textconv，日志关闭签名验证、补丁、notes 和装饰。Git 元数据查询前检查 `filter.*`，存在过滤器或检查失败则回到审核。总开关关闭时不做 Git 规则探测。仍依赖可信的 shell、程序安装及环境，不是系统沙箱。
+
+命中时状态栏显示“规则免审”，审计记录 `model: null` 和规则标识 `bypassRule`。标识按段组成：预设段记为 `common:<名称>`（如 `common:pwd`、`common:git-status`、`common:noop`、`common:cd`），预设 `common` 下由附加规则命中的段记为 `additional`，仅在 `bashReadonlyPreset: "off"` 时记录附加规则原文；复合命令按段用 `+` 连接并去重（如 `common:cat+common:head`）。规则标识不包含路径或搜索内容。操作哈希对应实际执行命令；审计失败、调用取消或变更时阻断执行，OMP 原生审批继续生效。使用 `/auto-review bash on|off` 切换总开关；手动修改配置后执行 `/auto-review reload`。`/auto-review status` 分别显示总开关、预设及附加规则。
 
 只有能确认来源为原生内置工具、路径属于当前工作目录的普通 `read`、`grep`、`glob`、`write` 和可识别的 `edit` 进入快速通道；内置 `todo`、`ask`、`yield` 也免审。覆盖了内置同名工具的扩展默认审核。
 
@@ -232,9 +253,9 @@ npm test
 npm run test:omp
 ```
 
-单元测试覆盖风险分流、严格 JSON、上下文来源与脱敏、符号链接、配置与重试参数校验、审计、异常、超时、取消、单次授权、推荐校验与选项标记、窗口到期防护、超时自动决策、备用模型链与时间均分、同模型重试与退避、重试预算不足与取消、失败尝试诊断、状态摘要和并发确认。Bash 免审另有独立覆盖：完整命令规则与配置校验、shell 复合语法/路径/执行修饰参数拒绝、加固改写、免审审计与不调用模型，以及存在 Git 过滤器时回到模型审核。可选审查日志独立覆盖：路径校验与保存/重载、四类决定在人工确认前落盘、完整命令与嵌套凭据脱敏、文件权限、绝对路径追加，以及关闭、免审、未配置模型时不写入和写入失败阻止调用。
+单元测试覆盖风险分流、严格 JSON、上下文来源与脱敏、符号链接、配置与重试参数校验、审计、异常、超时、取消、单次授权、推荐校验与选项标记、窗口到期防护、超时自动决策、备用模型链与时间均分、同模型重试与退避、重试预算不足与取消、失败尝试诊断、状态摘要和并发确认。Bash 免审另有独立覆盖：总开关/预设/附加规则配置矩阵、完整命令匹配、安全复合命令与管道、危险 shell 语法/路径/执行修饰参数拒绝、加固改写、免审审计与不调用模型，以及存在 Git 过滤器时回到模型审核。可选审查日志独立覆盖：路径校验与保存/重载、四类决定在人工确认前落盘、完整命令与嵌套凭据脱敏、文件权限、绝对路径追加，以及关闭、免审、未配置模型时不写入和写入失败阻止调用。
 
-`test:omp` 会在临时目录复制一个**不含 node_modules** 的插件包，用真实 omp 和本地模拟 provider 验证批准、拒绝、无效响应、未配置模型、原生审批、普通子 agent、`write` 经 `xd://` 转发执行的审核、只读 Bash 免审规则的改写与审计（`model: null` 加 `bypassRule`）、免审关闭与复合命令回退模型审核、配置了 Git 过滤器时回到审核、原生 `deny` 仍阻止免审命令、备用模型在主模型缺失/超时/响应无效时接管、有效裁决不触发切换、同模型重试后拿到结论或耗尽后切换备用模型、整条链失败转人工确认并记录各次尝试诊断，以及真实 TUI 的批准/显式拒绝/取消和按模型推荐自动放行/拒绝。模型由测试扩展在内存中模拟，不消耗付费模型额度；不修改用户的 omp 配置。受限子 agent 的不继承边界另有基于已锁定 SDK 源码的回归检查。
+`test:omp` 会在临时目录复制一个**不含 node_modules** 的插件包，用真实 omp 和本地模拟 provider 验证批准、拒绝、无效响应、未配置模型、原生审批、普通子 agent、`write` 经 `xd://` 转发执行的审核、只读 Bash 免审规则的改写与审计（`model: null` 加 `bypassRule`）、免审总开关关闭、安全复合命令及文本管道免审、危险复合命令回退模型审核、配置了 Git 过滤器时回到审核、原生 `deny` 仍阻止免审命令、备用模型在主模型缺失/超时/响应无效时接管、有效裁决不触发切换、同模型重试后拿到结论或耗尽后切换备用模型、整条链失败转人工确认并记录各次尝试诊断，以及真实 TUI 的批准/显式拒绝/取消和按模型推荐自动放行/拒绝。模型由测试扩展在内存中模拟，不消耗付费模型额度；不修改用户的 omp 配置。受限子 agent 的不继承边界另有基于已锁定 SDK 源码的回归检查。
 
 可设置 `OMP_BIN=/path/to/omp` 指定二进制，`OMP_SMOKE_CASES=child` 单独运行场景（`fallback-*` 为备用模型场景，`retry-*` 为同模型重试场景，`bypass-*` 为 Bash 免审场景），`KEEP_SMOKE_ARTIFACTS=1` 保留测试产物；失败时自动保留产物路径。
 

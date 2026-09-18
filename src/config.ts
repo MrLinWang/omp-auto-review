@@ -1,14 +1,18 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { DEFAULT_BASH_ALLOW_COMMANDS, normalizeBashCommand, readonlyBashCommand } from "./bash-rules.ts";
+import { normalizeBashCommand, readonlyBashCommand } from "./bash-rules.ts";
 
 export interface ReviewConfig {
   model?: string;
   /** Optional JSONL file; relative paths resolve against the user agent directory. */
   reviewLogPath?: string;
   fallbackModels: string[];
-  /** Complete read-only Bash commands that skip model review; `[]` disables the bypass. */
+  /** Independent master switch; disabling it preserves the configured rules. */
+  bashBypassEnabled?: boolean;
+  /** Built-in common read-only preset; `off` leaves only the additional rules. */
+  bashReadonlyPreset?: "common" | "off";
+  /** Additional complete read-only commands; an empty list does not disable the preset. */
   bashAllowCommands?: readonly string[];
   reviewTimeoutMs: number;
   modelTimeoutMs?: number;
@@ -22,7 +26,9 @@ export interface ReviewConfig {
 
 export const defaults: Readonly<ReviewConfig> = Object.freeze({
   fallbackModels: [],
-  bashAllowCommands: DEFAULT_BASH_ALLOW_COMMANDS,
+  bashBypassEnabled: true,
+  bashReadonlyPreset: "common",
+  bashAllowCommands: Object.freeze([] as string[]),
   reviewTimeoutMs: 20_000,
   modelTimeoutMs: 10_000,
   retryCount: 1,
@@ -39,7 +45,15 @@ export function parseConfig(value: unknown): ReviewConfig {
   const known = new Set(["model", "reviewLogPath", ...Object.keys(defaults)]);
   for (const key of Object.keys(obj)) if (!known.has(key)) throw new Error(`未知配置字段：${key}`);
   // Never share the default array: callers may mutate the parsed result.
-  const result = { ...defaults, fallbackModels: [] as string[], bashAllowCommands: [...DEFAULT_BASH_ALLOW_COMMANDS] };
+  const result = { ...defaults, fallbackModels: [] as string[], bashAllowCommands: [] as string[] };
+  if (obj.bashBypassEnabled !== undefined) {
+    if (typeof obj.bashBypassEnabled !== "boolean") throw new Error("bashBypassEnabled 必须为布尔值");
+    result.bashBypassEnabled = obj.bashBypassEnabled;
+  }
+  if (obj.bashReadonlyPreset !== undefined) {
+    if (obj.bashReadonlyPreset !== "common" && obj.bashReadonlyPreset !== "off") throw new Error("bashReadonlyPreset 必须为 common 或 off");
+    result.bashReadonlyPreset = obj.bashReadonlyPreset;
+  }
   if (obj.reviewLogPath !== undefined) {
     if (typeof obj.reviewLogPath !== "string" || !obj.reviewLogPath.trim() || obj.reviewLogPath.includes("\0")) {
       throw new Error("reviewLogPath 必须为非空日志文件路径；删除此字段可关闭审查日志");

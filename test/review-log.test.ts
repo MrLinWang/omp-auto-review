@@ -28,7 +28,7 @@ test("logs every model conclusion before human override, appending full redacted
     const file = join(w.root, "logs", "reviews.jsonl");
     for (const decision of ["allow", "deny", "ask", "error"] as const) {
       const engine = new ReviewEngine({
-        config: () => ({ ...defaults, model: "test/model", reviewLogPath: "logs/reviews.jsonl", bashAllowCommands: [] }),
+        config: () => ({ ...defaults, model: "test/model", reviewLogPath: "logs/reviews.jsonl", bashBypassEnabled: false }),
         sources: () => [builtin("bash")], protectedRoots: [],
         review: async () => {
           if (decision === "error") throw new Error("provider failure");

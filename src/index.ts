@@ -10,6 +10,7 @@ import { collectHistory } from "./context.ts";
 import { safeText } from "./privacy.ts";
 import { reviewWithModel } from "./transport.ts";
 import { reviewStatus } from "./status.ts";
+import { registerReviewCommand } from "./commands.ts";
 
 export default function autoReview(pi: ExtensionAPI): void {
   const agentDir = pi.pi.getAgentDir();
@@ -70,26 +71,8 @@ export default function autoReview(pi: ExtensionAPI): void {
   pi.on("agent_end", () => { engine.cancel(); });
   pi.on("input", () => { engine.cancel(); });
   pi.on("tool_call", (event, ctx) => engine.handle(event as ToolCall, ctx));
-  pi.registerCommand("auto-review", {
-    description: "独立模型审核：status | model <provider/model> | reload",
-    handler: async (args, ctx) => {
-      const parts = args.trim().split(/\s+/);
-      if (!args.trim() || (parts[0] === "status" && parts.length === 1)) {
-        ctx.ui.notify(safeText(`${status(ctx)}\n备用模型：${config.fallbackModels.join(" → ") || "未配置"}\nBash 免审规则：${config.bashAllowCommands?.join("；") || "已关闭"}\n审查日志：${config.reviewLogPath ? resolve(agentDir, config.reviewLogPath) : "已关闭"}\n配置：${store.path}\n审核总超时：${config.reviewTimeoutMs}ms；单次调用上限：${config.modelTimeoutMs ?? 10_000}ms\n每个模型额外重试：${config.retryCount ?? 1}次；重试间隔：${config.retryDelayMs ?? 500}ms\n确认超时：${config.confirmationTimeoutMs}ms；自动决策等待：${config.recommendationTimeoutMs ?? 15_000}ms（0 为关闭）\n受限子 agent 不继承插件；原生审批仍生效。`), "info");
-      } else if (parts[0] === "reload" && parts.length === 1) await load(ctx);
-      else if (parts[0] === "model" && parts.length === 2) {
-        const spec = parts[1];
-        const slash = spec.indexOf("/");
-        if (slash < 1 || !ctx.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1))) {
-          ctx.ui.notify("模型不存在；请使用 omp models 中的完整 provider/model", "error");
-          return;
-        }
-        engine.cancel();
-        try {
-          await store.save({ ...config, model: spec, fallbackModels: config.fallbackModels.filter(model => model !== spec) });
-          await load(ctx);
-        } catch { ctx.ui.notify("无法保存用户级审核配置", "error"); }
-      } else ctx.ui.notify("用法：/auto-review status | model <provider/model> | reload", "info");
-    },
+  registerReviewCommand(pi, {
+    config: () => config, configError: () => Boolean(configError), status, load,
+    cancel: () => engine.cancel(), store,
   });
 }

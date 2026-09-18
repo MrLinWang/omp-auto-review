@@ -86,9 +86,11 @@ export class ReviewEngine {
       snapshot = JSON.parse(canonical(event)) as ToolCall;
       hash = fingerprint({ sessionId, cwd, operation: snapshot });
       let config: ReviewConfig;
+      // Invalid configuration must fail closed: no reviewer model and no Bash bypass.
       try { config = this.deps.config(); }
-      catch { config = { fallbackModels: [], bashAllowCommands: [], reviewTimeoutMs: 20_000, confirmationTimeoutMs: 90_000, maxOperationBytes: 32_768, maxContextBytes: 24_576 }; }
-      const policy = await classify(snapshot, cwd, this.deps.sources().find(t => t.name === event.toolName), this.deps.protectedRoots, config.bashAllowCommands);
+      catch { config = { fallbackModels: [], bashBypassEnabled: false, bashAllowCommands: [], reviewTimeoutMs: 20_000, confirmationTimeoutMs: 90_000, maxOperationBytes: 32_768, maxContextBytes: 24_576 }; }
+      const policy = await classify(snapshot, cwd, this.deps.sources().find(t => t.name === event.toolName), this.deps.protectedRoots,
+        config.bashAllowCommands, config.bashReadonlyPreset ?? "common", config.bashBypassEnabled ?? true);
       if (controller.signal.aborted) return { block: true, reason: "审核会话已取消" };
       if (!policy.review && policy.bashCommand && policy.bypassRule) {
         // Rule bypass: no reviewer call, audited with model: null, and the host
