@@ -265,6 +265,6 @@ npm run test:omp
 
 `test:omp` 会在临时目录复制一个**不含 node_modules** 的插件包，用真实 omp 和本地模拟 provider 验证批准、拒绝、无效响应、未配置模型、审核准备失败（操作或用户指令超出预算时不调用模型、审计与审查日志记录固定原因、工具错误回传该原因）、插件总开关关闭（放行原始调用且不写审计与审查日志）、原生审批、普通子 agent、`write` 经 `xd://` 转发执行的审核、只读 Bash 免审规则的改写与审计（`model: null` 加 `bypassRule`）、免审总开关关闭、安全复合命令及文本管道免审、危险复合命令回退模型审核、配置了 Git 过滤器时回到审核、原生 `deny` 仍阻止免审命令、备用模型在主模型缺失/超时/响应无效时接管、有效裁决不触发切换、同模型重试后拿到结论或耗尽后切换备用模型、整条链失败转人工确认并记录各次尝试诊断，以及真实 TUI 的批准/显式拒绝/取消和按模型推荐自动放行/拒绝。模型由测试扩展在内存中模拟，不消耗付费模型额度；不修改用户的 omp 配置。受限子 agent 的不继承边界另有基于已锁定 SDK 源码的回归检查。
 
-可设置 `OMP_BIN=/path/to/omp` 指定二进制，`OMP_SMOKE_CASES=child` 单独运行场景（`fallback-*` 为备用模型场景，`retry-*` 为同模型重试场景，`bypass-*` 为 Bash 免审场景，`preflight-*` 为审核准备失败场景），`KEEP_SMOKE_ARTIFACTS=1` 保留测试产物；失败时自动保留产物路径。
+可设置 `OMP_BIN=/path/to/omp` 指定二进制，`OMP_SMOKE_CASES=child` 单独运行场景（`fallback-*` 为备用模型场景，`retry-*` 为同模型重试场景，`bypass-*` 为 Bash 免审场景，`preflight-*` 为审核准备失败场景，`disabled` 为插件总开关关闭场景），`KEEP_SMOKE_ARTIFACTS=1` 保留测试产物；失败时自动保留产物路径。
 
 接口参考：[扩展接口](https://github.com/can1357/oh-my-pi/blob/v18.1.16/docs/extensions.md)、[扩展加载规则](https://github.com/can1357/oh-my-pi/blob/v18.1.16/docs/extension-loading.md)。
