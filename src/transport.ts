@@ -1,17 +1,15 @@
 import { completeSimple } from "@oh-my-pi/pi-ai";
-import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { ReviewConfig } from "./config.ts";
-import { buildReviewData, parseVerdict, REVIEW_PROMPT, ReviewPreparationError, type ReviewRequest, type Verdict } from "./reviewer.ts";
+import type { LlmReviewer } from "./chain.ts";
+import { parseVerdict, REVIEW_PROMPT } from "./reviewer.ts";
 import { reviewReasoning } from "./thinking.ts";
 import { reviewWithFallback } from "./fallback.ts";
-import { ReviewAttemptError, type AttemptObserver } from "./attempt.ts";
+import { ReviewAttemptError } from "./attempt.ts";
 
-export async function reviewWithModel(request: ReviewRequest, config: ReviewConfig, ctx: ExtensionContext, signal: AbortSignal, onAttempt?: AttemptObserver): Promise<Verdict> {
-  if (!config.model) throw new ReviewPreparationError("model_not_configured");
-  const content = buildReviewData(request, config);
+/** The LLM chain: primary first, then the configured backups in order, inside `budgetMs`. */
+export const reviewWithLlm: LlmReviewer = (content, request, config, ctx, signal, onAttempt, budgetMs) => {
   // The chain is built once per call: primary first, then the configured backups in order.
-  const candidates = [config.model, ...(config.fallbackModels ?? [])];
-  return reviewWithFallback(candidates, config.reviewTimeoutMs, signal, async (spec, attemptSignal, index, retryIndex) => {
+  const candidates = [config.model!, ...(config.fallbackModels ?? [])];
+  return reviewWithFallback(candidates, budgetMs, signal, async (spec, attemptSignal, index, retryIndex) => {
     const slash = spec.indexOf("/");
     // Every configured candidate is an exact lookup; never fall back to the agent's main model.
     const model = ctx.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1));
@@ -35,7 +33,7 @@ export async function reviewWithModel(request: ReviewRequest, config: ReviewConf
     if (response.stopReason === "length") throw new ReviewAttemptError("output_limit");
     if (response.stopReason === "error") throw new ReviewAttemptError("call_error");
     if (response.stopReason !== "stop" || response.content.some(c => c.type === "toolCall")) throw new ReviewAttemptError("incomplete");
-    try { return parseVerdict(response.content.filter(c => c.type === "text").map(c => c.text).join("")); }
+    try { return { ...parseVerdict(response.content.filter(c => c.type === "text").map(c => c.text).join("")), source: "llm" as const }; }
     catch { throw new ReviewAttemptError("invalid_response"); }
   }, onAttempt, { modelTimeoutMs: config.modelTimeoutMs ?? 10_000, retryCount: config.retryCount ?? 1, retryDelayMs: config.retryDelayMs ?? 500 });
-}
+};

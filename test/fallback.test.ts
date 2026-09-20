@@ -69,7 +69,7 @@ test("a hung attempt is aborted while fallback retains time, and late success is
   const result = await reviewWithFallback(models, 200, new AbortController().signal, async (_model, signal, index) => {
     if (index === 0) {
       firstSignal = signal;
-      return new Promise(resolve => { finish = resolve; });
+      return new Promise<Verdict>(resolve => { finish = resolve; });
     }
     assert.equal(firstSignal.aborted, true);
     return { ...allow, decision: "deny" };

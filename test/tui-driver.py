@@ -17,7 +17,10 @@ child = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave,
                          env=os.environ, start_new_session=True)
 os.close(slave)
 output = bytearray()
-answered = False
+scenario = os.environ["OMP_REVIEW_TEST_CASE"]
+# A prefilter verdict inside the threshold is final, so no dialog is offered to answer.
+expects_dialog = scenario != "jev-deny"
+answered = not expects_dialog
 exited = False
 deadline = time.monotonic() + 50
 try:
@@ -42,7 +45,6 @@ try:
                 os.write(master, b"\x1b]11;rgb:0000/0000/0000\x1b\\")
         if not answered and "仅批准本次调用".encode() in output:
             time.sleep(0.05)
-            scenario = os.environ["OMP_REVIEW_TEST_CASE"]
             if scenario == "tui-approve":
                 os.write(master, b"\r")
             elif scenario == "tui-cancel":
@@ -72,6 +74,9 @@ finally:
         child.wait()
     os.close(master)
 sys.stdout.buffer.write(output)
+if not expects_dialog and "仅批准本次调用".encode() in output:
+    print("\nTUI_DRIVER_ERROR: a confirmation dialog appeared where none was expected")
+    sys.exit(1)
 if not answered:
     print("\nTUI_DRIVER_ERROR: approval dialog never appeared")
     sys.exit(1)

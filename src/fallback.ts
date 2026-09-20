@@ -6,7 +6,11 @@ export interface RetryOptions {
   modelTimeoutMs?: number;
   retryCount?: number;
   retryDelayMs?: number;
+  /** Failure categories a retry cannot fix; defaults to the LLM chain's set. */
+  permanent?: readonly ReviewAttempt["status"][];
 }
+
+const permanentFailures: readonly ReviewAttempt["status"][] = ["missing_model", "auth_error", "output_limit"];
 
 /** Backoff that rejects with the cancellation error as soon as the signal aborts. */
 async function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -25,12 +29,17 @@ async function delay(ms: number, signal: AbortSignal): Promise<void> {
   }
 }
 
-/** Retry transient failures inside each model's time share; permanent errors skip retries and valid verdicts end the chain. */
-export async function reviewWithFallback(
+/**
+ * Retry transient failures inside each model's time share; permanent errors skip retries and valid results end the chain.
+ *
+ * Generic over the result so the jev prefilter can reuse the same budget, retry, cancellation
+ * and attempt-reporting behaviour for its own outcome type.
+ */
+export async function reviewWithFallback<T extends object = Verdict>(
   models: readonly string[], timeoutMs: number, signal: AbortSignal,
-  review: (model: string, signal: AbortSignal, index: number, retryIndex: number) => Promise<Verdict>,
+  review: (model: string, signal: AbortSignal, index: number, retryIndex: number) => Promise<T>,
   onAttempt?: AttemptObserver, options: RetryOptions = {},
-): Promise<Verdict> {
+): Promise<T & { reviewerModel: string; fallbackUsed?: boolean }> {
   const deadline = Date.now() + timeoutMs;
   const retries = options.retryCount ?? 0;
   const retryDelay = options.retryDelayMs ?? 0;
@@ -84,7 +93,7 @@ export async function reviewWithFallback(
         attempt.abort();
       }
       // A retry cannot fix these; move straight to the next candidate.
-      if (["missing_model", "auth_error", "output_limit"].includes(failure)) break;
+      if ((options.permanent ?? permanentFailures).includes(failure)) break;
     }
   }
   throw new Error("所有审核模型均不可用、超时或响应无效");

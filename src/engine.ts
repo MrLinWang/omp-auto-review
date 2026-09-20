@@ -5,6 +5,7 @@ import type { ReviewLogRecord } from "./review-log.ts";
 import { classify, type ToolCall, type ToolSource } from "./policy.ts";
 import { canonical, fingerprint, redact, safeText } from "./privacy.ts";
 import { preparationReasons, ReviewPreparationError, type ReviewRequest, type Verdict } from "./reviewer.ts";
+import type { PrefilterObserver, PrefilterRecord } from "./jev.ts";
 import { authorityFingerprint } from "./context.ts";
 import type { ReviewResult } from "./status.ts";
 import { selectConfirmation } from "./confirmation.ts";
@@ -15,7 +16,7 @@ export interface Dependencies {
   sources(): ToolSource[];
   history?(ctx: ExtensionContext): unknown[];
   protectedRoots: string[];
-  review(request: ReviewRequest, config: ReviewConfig, ctx: ExtensionContext, signal: AbortSignal, onAttempt?: AttemptObserver): Promise<Verdict>;
+  review(request: ReviewRequest, config: ReviewConfig, ctx: ExtensionContext, signal: AbortSignal, onAttempt?: AttemptObserver, onPrefilter?: PrefilterObserver): Promise<Verdict>;
   audit(record: AuditRecord): Promise<void>;
   /** Required whenever the config sets `reviewLogPath`: a missing writer blocks the call instead of skipping the record. */
   reviewLog?(path: string, record: ReviewLogRecord): Promise<void>;
@@ -82,6 +83,7 @@ export class ReviewEngine {
     let model: string | null = null;
     let fallbackUsed = false;
     let preflightError: AuditRecord["preflightError"];
+    let prefilter: PrefilterRecord | undefined;
     const attempts: ReviewAttempt[] = [];
     try {
       let config: ReviewConfig;
@@ -122,6 +124,8 @@ export class ReviewEngine {
       if (!policy.review) return undefined;
       reviewed = true;
       model = config.model ?? null;
+      // The prefilter is an independent reviewer: a jev-only setup is a configured setup.
+      const prefilterReady = Boolean(config.jev && config.jev.enabled !== false);
       const history = this.deps.history?.(ctx) ?? ctx.sessionManager.getBranch();
       const authority = authorityFingerprint(history);
       const authorizationChanged = () => authorityFingerprint(this.deps.history?.(ctx) ?? ctx.sessionManager.getBranch()) !== authority;
@@ -134,7 +138,7 @@ export class ReviewEngine {
       let acceptingAttempts = true;
       let attemptStarted = Date.now();
       try {
-        if (!config.model) throw new ReviewPreparationError("model_not_configured");
+        if (!config.model && !prefilterReady) throw new ReviewPreparationError("model_not_configured");
         const verdict = await withSignal(this.deps.review({
           operation: snapshot, cwd, trigger: policy.reason, history,
         }, config, ctx, reviewController.signal, attempt => {
@@ -145,7 +149,7 @@ export class ReviewEngine {
           if (index === -1) attempts.push({ ...attempt });
           else attempts[index] = { ...attempt };
           model = attempt.model;
-        }), reviewController.signal);
+        }, record => { if (acceptingAttempts) prefilter = { ...record }; }), reviewController.signal);
         decision = verdict.decision;
         // The chain names the deciding candidate; otherwise keep the last attempted model.
         model = verdict.reviewerModel ?? model;
@@ -160,11 +164,11 @@ export class ReviewEngine {
           pending.status = controller.signal.aborted ? "cancelled" : reviewController.signal.aborted ? "timeout" : "call_error";
           pending.elapsedMs = Date.now() - attemptStarted;
         }
-        // Local preparation failures carry a fixed reason and never claim an attempt;
-        // anything else keeps the call-failure summary and the per-attempt diagnostics.
-        if (error instanceof ReviewPreparationError && !attempts.length) {
+        // Local preparation failures carry a fixed reason and never claim an attempt of their own;
+        // the prefilter may still have attempted, so its model and diagnostics are kept.
+        if (error instanceof ReviewPreparationError) {
           preflightError = error.code;
-          model = null;
+          if (!attempts.length) model = null;
           reason = preparationReasons[preflightError];
         } else {
           reason = "审核模型调用失败、超时或响应无效，需人工确认";
@@ -177,20 +181,26 @@ export class ReviewEngine {
         controller.signal.removeEventListener("abort", abortReview);
       }
 
-      // Persist the model's conclusion before human confirmation can override it.
+      // Persist the conclusion before a human confirmation could override it; a trusted
+      // prefilter verdict is never offered for override, but it is recorded the same way.
       // The captured config keeps an in-flight review tied to its original log path.
-      if (config.reviewLogPath && config.model) {
+      if (config.reviewLogPath && (config.model || prefilterReady)) {
         if (!this.deps.reviewLog) throw new Error("审查日志写入器未配置");
         await withSignal(this.deps.reviewLog(config.reviewLogPath, {
           timestamp: new Date().toISOString(), sessionId, cwd, operation: snapshot,
           model, fallbackUsed, decision, reason, recommendation,
+          ...(prefilter ? { prefilter } : {}),
           ...(preflightError ? { preflightError } : {}),
           ...(attempts.length ? { attempts: attempts.map(attempt => ({ ...attempt })) } : {}),
         }), controller.signal);
       }
 
+      // A verdict the prefilter produced inside the threshold is final by configuration:
+      // above the threshold jev's own choice is executed, so its deny blocks without asking.
+      // The threshold is where that tolerance is set; below it the LLM chain decides instead.
+      const prefilterDecided = prefilter?.trusted === true;
       if (!controller.signal.aborted && decision === "allow") outcome = "allowed";
-      else if (!controller.signal.aborted && ctx.hasUI && ctx.mode === "tui") {
+      else if (!controller.signal.aborted && !prefilterDecided && ctx.hasUI && ctx.mode === "tui") {
         // Never offer approval of an abbreviated operation. Bound display size instead.
         const operationText = JSON.stringify(snapshot.input, null, 2);
         if (Buffer.byteLength(operationText) <= 131_072) {
@@ -209,10 +219,13 @@ export class ReviewEngine {
                 : "\n模型推荐：未提供" : "";
               const countdown = delay ? `\n${delay / 1000} 秒内未选择，将自动${recommendation!.action === "approve" ? "批准" : "拒绝"}本次调用；取消可阻止自动决策。` : "";
               // Name a backup by comparing the last attempted model with the configured primary:
-              // counting attempts would also fire when the primary itself was retried.
+              // counting attempts would also fire when the primary itself was retried. This dialog
+              // is never reached by a prefilter verdict, so only LLM candidates are compared.
               const lastModel = attempts.at(-1)?.model;
-              const modelLine = preflightError ? "审核模型：未调用"
-                : `${decision === "error" ? "最后尝试模型" : "审核模型"}：${model}${fallbackUsed || (lastModel !== undefined && lastModel !== config.model) ? "（备用）" : ""}`;
+              const backup = fallbackUsed || (lastModel !== undefined && lastModel !== config.model);
+              // "Never called" must stay literally true: a prefilter attempt still counts as one.
+              const modelLine = preflightError && !attempts.length ? "审核模型：未调用"
+                : `${decision === "error" ? "最后尝试模型" : "审核模型"}：${model}${backup ? "（备用）" : ""}`;
               const result = await selectConfirmation(ctx, safeText(
                 `自动审核：${decision}\n${modelLine}\n原因：${reason}${advice}${countdown}\n工作目录：${cwd}\n工具：${snapshot.toolName}\n调用：${snapshot.toolCallId}\n${operationText}`,
               ), controller.signal, timeout, delay, recommendation?.action);
@@ -232,7 +245,7 @@ export class ReviewEngine {
       await withSignal(this.deps.audit({
         timestamp: new Date().toISOString(), sessionId, toolCallId: snapshot.toolCallId, toolName: snapshot.toolName,
         operationHash: hash, parameterSummary: { keys: Object.keys(snapshot.input), bytes: Buffer.byteLength(canonical(snapshot.input)) },
-        model, ...(preflightError ? { preflightError } : {}), ...(attempts.length ? { attempts } : {}), ...(fallbackUsed ? { fallbackUsed: true } : {}), decision, reason, ...(recommendation ? { recommendation } : {}), outcome, humanOverride, ...(automaticRecommendation ? { automaticRecommendation: true } : {}), elapsedMs: Date.now() - started,
+        model, ...(prefilter ? { prefilter } : {}), ...(preflightError ? { preflightError } : {}), ...(attempts.length ? { attempts } : {}), ...(fallbackUsed ? { fallbackUsed: true } : {}), decision, reason, ...(recommendation ? { recommendation } : {}), outcome, humanOverride, ...(automaticRecommendation ? { automaticRecommendation: true } : {}), elapsedMs: Date.now() - started,
       }), controller.signal);
       // Audit I/O can yield; re-check cancellation and mutation after it too.
       if (controller.signal.aborted || authorizationChanged() || ctx.sessionManager.getSessionId() !== sessionId || ctx.cwd !== cwd ||
@@ -252,7 +265,7 @@ export class ReviewEngine {
     } finally {
       // Only reviews that ran on a still-current call are reported.
       if (reviewed && snapshot && !controller.signal.aborted && ctx.sessionManager.getSessionId() === sessionId && ctx.cwd === cwd) {
-        try { this.deps.onResult?.(snapshot, { decision, outcome, humanOverride, ...(preflightError ? { preflightError } : {}), ...(fallbackUsed ? { fallbackUsed: true, model } : {}), ...(automaticRecommendation ? { automaticRecommendation: true } : {}) }, ctx); }
+        try { this.deps.onResult?.(snapshot, { decision, outcome, humanOverride, ...(prefilter ? { prefilter } : {}), ...(preflightError ? { preflightError } : {}), ...(fallbackUsed ? { fallbackUsed: true, model } : {}), ...(automaticRecommendation ? { automaticRecommendation: true } : {}) }, ctx); }
         catch { /* Status rendering must not change an approval decision. */ }
       }
       if (overallTimer) clearTimeout(overallTimer);

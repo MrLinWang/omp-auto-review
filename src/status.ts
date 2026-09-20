@@ -3,7 +3,7 @@ import type { ToolCall } from "./policy.ts";
 import { redact, safeText } from "./privacy.ts";
 
 /** `model` is carried only when a fallback candidate decided, so the label can name it. */
-export type ReviewResult = Pick<AuditRecord, "decision" | "outcome" | "humanOverride" | "automaticRecommendation" | "fallbackUsed" | "bypassRule" | "preflightError"> & { model?: string | null };
+export type ReviewResult = Pick<AuditRecord, "decision" | "outcome" | "humanOverride" | "automaticRecommendation" | "fallbackUsed" | "bypassRule" | "preflightError" | "prefilter"> & { model?: string | null };
 
 /** Label for the last completed review; rule-bypassed calls are labelled as such, and automatic decisions are never shown as human approvals. */
 export function reviewStatus(operation: ToolCall, result: ReviewResult): string {
@@ -13,6 +13,9 @@ export function reviewStatus(operation: ToolCall, result: ReviewResult): string 
     ? result.humanOverride ? "人工放行" : "审核通过"
     : result.decision === "error" ? result.preflightError ? "审核条件不足，已阻止" : "审核异常，已阻止"
     : result.decision === "deny" ? "审核拒绝" : "未放行";
+  // A trusted prefilter verdict is named as such. The engine no longer offers those for
+  // override, so the guards only keep this label honest if a caller ever reports both.
+  const prefilter = result.prefilter?.trusted && !result.humanOverride && !result.automaticRecommendation ? "（jev 前置）" : "";
   const input = operation.input;
   // Summarize only the operation, never file contents or arbitrary tool payloads.
   const detail = typeof input.command === "string" ? input.command
@@ -22,5 +25,5 @@ export function reviewStatus(operation: ToolCall, result: ReviewResult): string 
   const chars = Array.from(summary);
   const fallback = result.fallbackUsed ? `（备用：${safeText(redact(result.model ?? "未知"))}）` : "";
   // The fallback marker precedes the summary so a truncated summary never hides it.
-  return `${label}${fallback} · ${chars.length > 100 ? `${chars.slice(0, 99).join("")}…` : summary}`;
+  return `${label}${prefilter}${fallback} · ${chars.length > 100 ? `${chars.slice(0, 99).join("")}…` : summary}`;
 }

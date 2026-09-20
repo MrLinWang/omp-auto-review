@@ -30,6 +30,18 @@ export function attemptErrorCode(error: unknown): ReviewAttempt["status"] {
   return "call_error";
 }
 
+/**
+ * Maps an HTTP status onto a fixed category. Response bodies are never inspected, so an
+ * endpoint echoing a command or a key cannot reach the diagnostics.
+ */
+export function httpAttemptCode(status: number): Exclude<ReviewAttempt["status"], "running" | "success"> {
+  if (status === 401 || status === 403) return "auth_error";
+  // A rejected request body is deterministic: retrying the same payload cannot fix it.
+  if (status === 422) return "invalid_response";
+  if (status === 429 || status === 529) return "rate_limit";
+  return "call_error";
+}
+
 export function formatAttempts(attempts: readonly ReviewAttempt[]): string {
   return attempts.map(attempt => `${attempt.model}${attempt.attempt ? ` 第${attempt.attempt}次` : ""}：${attemptLabels[attempt.status]}（${(attempt.elapsedMs / 1000).toFixed(1)}s）`).join(" → ");
 }

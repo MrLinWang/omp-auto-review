@@ -30,7 +30,7 @@ test("transient error retries the same model and preserves each attempt", async 
 test("timeout aborts the first request then retries within the configured limit", async () => {
   let first!: AbortSignal;
   const result = await reviewWithFallback(models, 1000, new AbortController().signal, async (_model, signal, _index, retry) => {
-    if (!retry) { first = signal; return new Promise(() => {}); }
+    if (!retry) { first = signal; return new Promise<Verdict>(() => {}); }
     assert.equal(first.aborted, true);
     return verdict;
   }, undefined, { retryCount: 1, modelTimeoutMs: 15 });

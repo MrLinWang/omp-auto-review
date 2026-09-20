@@ -4,7 +4,7 @@ import type { AuditRecord } from "../src/audit.ts";
 import { defaults, type ReviewConfig } from "../src/config.ts";
 import { ConfirmationQueue, ReviewEngine } from "../src/engine.ts";
 import type { ReviewLogRecord } from "../src/review-log.ts";
-import { buildReviewData, preparationReasons, ReviewPreparationError, type PreparationErrorCode } from "../src/reviewer.ts";
+import { buildReviewPayload, preparationReasons, ReviewPreparationError, type PreparationErrorCode } from "../src/reviewer.ts";
 import type { ReviewResult } from "../src/status.ts";
 import { builtin, call, context, userHistory, workspace } from "./helpers.ts";
 
@@ -32,7 +32,7 @@ test("preparation failures retain their cause without claiming a model attempt",
       const engine = new ReviewEngine({
         config: () => config, sources: () => [builtin("bash")], protectedRoots: [], history: () => scenario.history,
         review: async (request, settings) => {
-          buildReviewData(request, settings);
+          buildReviewPayload(request, settings);
           modelCalls++;
           assert.fail("preparation failure must not reach the model");
         },
@@ -68,7 +68,7 @@ test("missing context is shown before explicit human approval without automatic 
       const engine = new ReviewEngine({
         config: () => ({ ...defaults, model: "test/reviewer", bashBypassEnabled: false, reviewLogPath: "reviews.jsonl" }),
         sources: () => [builtin("bash")], protectedRoots: [], history: () => [],
-        review: async (request, config) => { buildReviewData(request, config); assert.fail("must not reach model"); },
+        review: async (request, config) => { buildReviewPayload(request, config); assert.fail("must not reach model"); },
         audit: async record => { records.push(record); }, reviewLog: async (_path, record) => { logs.push(record); },
       }, new ConfirmationQueue());
       const ctx = context(w.cwd, async (title, _choices, options) => {
@@ -120,8 +120,8 @@ test("verified ancestor user context still reaches model review", async () => {
         { type: "auto_review_ancestor_user", sourceSessionId: "parent", message: { role: "user", content: "Run the tests" } },
       ],
       review: async (request, config) => {
-        const data = JSON.parse(buildReviewData(request, config));
-        assert.equal(data.latestUserInstruction.source, "ancestor_user_message");
+        const data = buildReviewPayload(request, config);
+        assert.equal((data.latestUserInstruction as { source: string }).source, "ancestor_user_message");
         modelCalls++;
         return { decision: "allow", risk: "low", authorization: "explicit", reason: "Authorized tests" };
       },

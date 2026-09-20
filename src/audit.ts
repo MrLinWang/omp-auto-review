@@ -2,6 +2,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { redactValue } from "./privacy.ts";
 import type { ReviewAttempt } from "./attempt.ts";
+import type { PrefilterRecord } from "./jev.ts";
 import type { PreparationErrorCode } from "./reviewer.ts";
 
 export interface AuditRecord {
@@ -14,6 +15,8 @@ export interface AuditRecord {
   model: string | null;
   /** True when a fallback candidate produced the verdict; `model` then names that model. */
   fallbackUsed?: boolean;
+  /** What the jev prefilter did, present whenever it ran; `model` names jev when it decided. */
+  prefilter?: PrefilterRecord;
   /** Exact additional rule or stable preset rule identifiers; no raw compound command. */
   bypassRule?: string;
   attempts?: ReviewAttempt[];

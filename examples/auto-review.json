@@ -2,6 +2,16 @@
   "enabled": true,
   "model": "YOUR_PROVIDER/YOUR_MODEL_ID",
   "fallbackModels": [],
+  "jev": {
+    "enabled": true,
+    "baseUrl": "https://api.typesafe.ai/v1/systemone",
+    "model": "jev-latest",
+    "apiKeyEnv": "TYPESAFE_API_KEY",
+    "confidenceThreshold": 0.85,
+    "timeoutMs": 5000,
+    "retryCount": 1,
+    "retryDelayMs": 500
+  },
   "bashBypassEnabled": true,
   "bashReadonlyPreset": "common",
   "bashAllowCommands": [],

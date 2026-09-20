@@ -19,6 +19,8 @@ export interface ReviewLogRecord {
   operation: ToolCall;
   model: string | null;
   fallbackUsed: boolean;
+  /** What the jev prefilter did on this call, when it ran. */
+  prefilter?: AuditRecord["prefilter"];
   decision: AuditRecord["decision"];
   /** Redacted verdict reason; the chain's own failure summary when no verdict arrived. */
   reason: string;
