@@ -55,6 +55,7 @@ test("off cancels pending reviews, persists all settings and on resumes review",
       config: () => config, configError: () => false, status: () => config.enabled ? "已启用" : "已关闭",
       cancel: () => engine.cancel(), store,
       load: async () => { engine.cancel(); config = await store.load(); },
+      jevModels: () => [],
     });
     const ctx = context(w.cwd).ctx as ExtensionCommandContext;
     const messages: string[] = [];
@@ -91,6 +92,7 @@ test("failed saves and malformed config cannot switch review off", async () => {
     registerReviewCommand({ registerCommand: (_name, spec) => { handler = spec.handler; } }, {
       config: () => config, configError: () => invalid, status: () => "ready", store,
       cancel: () => assert.fail("must not cancel"), load: async () => assert.fail("must not reload"),
+      jevModels: () => [],
     });
     const ctx = context(w.cwd).ctx as ExtensionCommandContext;
     const messages: string[] = [];

@@ -90,35 +90,38 @@ test("disabled logs, fast paths and missing models do not write; write failures 
 });
 
 
-test("the prefilter record is logged with its numbers and without any key", async () => {
+test("the prefilter record is logged with its numbers", async () => {
   const w = await workspace();
   try {
     const file = join(w.root, "reviews.jsonl");
-    const prefilter = { model: "jev-1.13.0", decision: "deny", probability: 0.97, confidence: 0.94, threshold: 0.85, trusted: true, status: "decided", elapsedMs: 31 } as const;
+    const prefilter = { model: "typesafe/jev-1.13.0", decision: "deny", probability: 0.97, confidence: 0.94, threshold: 0.85, trusted: true, status: "decided", elapsedMs: 31 } as const;
+    // Redact the synthetic secret fragment while preserving the reason's newline in JSONL.
+    const reason = "前置审查判定应拒绝 api_key=ts-secret-value\n第二行";
     const engine = new ReviewEngine({
       config: () => ({
         ...defaults, model: undefined, reviewLogPath: "reviews.jsonl", bashBypassEnabled: false,
         // A jev-only setup must still produce a review log.
-        jev: { enabled: true, baseUrl: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", apiKeyEnv: "TYPESAFE_API_KEY", apiKey: "ts-secret-value", confidenceThreshold: 0.85, timeoutMs: 5_000, retryCount: 1, retryDelayMs: 500 },
+        jev: { enabled: true, confidenceThreshold: 0.85, timeoutMs: 5_000, retryCount: 1, retryDelayMs: 500 },
       }),
       sources: () => [builtin("bash")], protectedRoots: [],
       review: async (_request, _config, _ctx, _signal, onAttempt, onPrefilter) => {
-        onAttempt?.({ model: "jev:jev-latest", status: "success", elapsedMs: 31 });
+        onAttempt?.({ model: "jev:typesafe/jev-latest", status: "success", elapsedMs: 31 });
         onPrefilter?.({ ...prefilter });
-        return { decision: "deny", reason: "前置审查（jev-1.13.0）判定应拒绝：胜出概率 0.97 ≥ 阈值 0.85（confidence 0.94）", source: "prefilter", reviewerModel: "jev:jev-1.13.0" };
+        return { decision: "deny", reason, source: "prefilter", reviewerModel: "jev:typesafe/jev-1.13.0" };
       },
       audit: async () => {},
       reviewLog: (path, record) => appendReviewLog(w.root, path, record),
     });
     assert.equal((await engine.handle(call("bash", { command: "rm -rf /etc" }), context(w.cwd).ctx))?.block, true);
-    const record: ReviewLogRecord = JSON.parse((await readFile(file, "utf8")).trim());
-    assert.deepEqual(record.prefilter, prefilter);
-    assert.equal(record.model, "jev:jev-1.13.0");
-    assert.equal(record.decision, "deny");
-    assert.match(record.reason, /前置审查（jev-1\.13\.0）判定应拒绝/);
-    // Neither the configured key nor the endpoint appears in the log.
     const text = await readFile(file, "utf8");
+    const record: ReviewLogRecord = JSON.parse(text.trim());
+    assert.deepEqual(record.prefilter, prefilter);
+    assert.equal(record.model, "jev:typesafe/jev-1.13.0");
+    assert.equal(record.decision, "deny");
+    // The secret-looking fragment is redacted; the control character keeps the log single-line JSONL.
     assert.ok(!text.includes("ts-secret-value"));
-    assert.ok(!text.includes("api.typesafe.ai"));
+    assert.equal(text.trim().split("\n").length, 1);
+    assert.ok(record.reason.includes("[REDACTED]"));
+    assert.ok(record.reason.includes("\n第二行"));
   } finally { await w.cleanup(); }
 });

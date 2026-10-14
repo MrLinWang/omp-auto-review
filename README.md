@@ -2,13 +2,13 @@
 
 **English** | [简体中文](README_ZH.md)
 
-Have an independent model review every operation before oh-my-pi executes a tool. Recognised built-in reads and edits take a local fast path, built-in read-only Bash queries that match a rule run exempt from review, and everything else is first judged by the optional TypeSafe jev prefilter, falling through to the configured LLM review chain when jev is not confident enough. Targets `omp 18.1.16`, works through the official `tool_call` extension interface, and does not modify the omp core.
+Have an independent model review operations before oh-my-pi executes a tool. Recognised built-in reads and edits take a local fast path, built-in read-only Bash queries that match a rule run exempt from review, and everything else enters the optional native judgment prefilter (jev), followed by the configured LLM review chain if the prefilter cannot decide. Targets `omp 18.10.3`, works through the official `tool_call` extension interface, and does not modify the omp core.
 
 ```text
 tool call → local triage ─┬→ exempt read/edit → execute
                           ├→ matched read-only Bash rule → hardened command → OMP approval → execute
                           └→ jev prefilter (optional, one Choice question)
-                             ├→ winning probability ≥ threshold → act on jev's choice
+                             ├→ winning probability ≥ threshold and confidence ≥ 0.5 → act on jev's choice
                              │   ├→ allow → OMP approval → execute
                              │   └→ deny → block outright (no confirmation window)
                              └→ not confident / call failed / not configured
@@ -39,7 +39,7 @@ Then, inside omp:
 
 Models and authentication reuse the omp registry, including existing providers, user-configured providers, and their API key/OAuth resolution. Review requests carry no tool definitions. When a call fails, the same model is retried first, then the backups in order, and a human confirmation follows if all of them fail.
 
-To have most calls judged by a faster, cheaper model, additionally enable the [jev prefilter](#jev-prefilter): set the `TYPESAFE_API_KEY` environment variable and run `/auto-review jev on`. Calls inside the threshold are decided by jev, and everything else still goes to the LLM chain configured above. Its endpoint and key are independent of the omp registry.
+To enable the optional [jev prefilter](#jev-prefilter), configure an available native judgment model for omp's `judge` role and run `/auto-review jev on`. The host supplies the model, endpoint, credentials and provider/model headers; the plugin configures only the gating and retry policy. Trusted answers decide the call directly; uncertain answers or exhausted native candidates hand over to the LLM chain configured above.
 
 For long-term use, **append** the plugin's absolute path to the end of the existing `extensions` list in your user-level omp `config.yml`, and merge the timeout setting:
 
@@ -65,7 +65,7 @@ Copy the [example configuration](examples/auto-review.json), fill in the model, 
 | --- | --- | --- |
 | `enabled` | `true` | Master switch for plugin review; `false` skips plugin review and keeps every other setting |
 | `model` | unset | Full `provider/model`, matched exactly |
-| `jev` | unset (off) | Optional TypeSafe jev prefilter block, see [jev prefilter](#jev-prefilter); its endpoint and key are independent of the omp model registry |
+| `jev` | unset (off) | Optional native judgment prefilter policy, see [jev prefilter](#jev-prefilter); candidates come from omp's `judge` role chain and connection settings from its model registry |
 | `reviewLogPath` | unset (off) | Optional review-log file path; appends command parameters and model verdicts as JSONL. A relative path resolves against the user-level agent directory |
 | `bashBypassEnabled` | `true` | The single master switch for Bash exemption; `false` sends every Bash call to review |
 | `bashReadonlyPreset` | `common` | `common` enables the built-in read-only rules, `off` uses only the additional rules |
@@ -80,7 +80,7 @@ Copy the [example configuration](examples/auto-review.json), fill in the model, 
 | `maxOperationBytes` | `32768` | Size limit of the full operation sent to the reviewer |
 | `maxContextBytes` | `24576` | Budget for the user instruction and recent history |
 
-Review and confirmation timeouts may not add up to more than 110 seconds. Queueing also consumes the current call's total budget, so a call never waits indefinitely behind another confirmation window. The recommended host-side timeout is 120 seconds. The `18.1.16` host additionally pauses the tool-hook budget while its own interactive windows are displayed; the plugin still enforces its own total timeout.
+Review and confirmation timeouts may not add up to more than 110 seconds. Queueing also consumes the current call's total budget, so a call never waits indefinitely behind another confirmation window. The recommended host-side timeout is 120 seconds. The `18.10.3` host additionally pauses the tool-hook budget while its own interactive windows are displayed; the plugin still enforces its own total timeout.
 
 Review automatically uses the lowest thinking effort the deciding model declares, ordered `minimal < low < medium < high < xhigh < max`, independent of the order in the configuration list. Models without reasoning support, or without declared adjustable efforts, are called without a thinking parameter. Existing effort mappings are handled by OMP.
 
@@ -116,10 +116,10 @@ Retries and their waits share that model's time slice and never extend the total
 Each model attempt's name, result category and elapsed time are recorded in the audit's `attempts` array, plus a 1-based `attempt` number when retries are enabled. When the chain fails, the confirmation dialog names the last attempted model and lists each model's failure cause (timeout, model not registered, authentication failure, rate limited, invalid response format, output limit reached, response did not complete, or endpoint error). The `（备用）` ("backup") marker appears only when the last attempted model is not the primary reviewer; a retry of the primary itself does not trigger it. Raw endpoint errors and response bodies are never written into diagnostics, to avoid leaking credentials. A failed record's `model` is the last attempted model, while `fallbackUsed` still only means a backup produced a valid verdict. No `attempts` array is produced when no model attempt was started.
 
 - `/auto-review on` / `/auto-review off`: save and immediately enable or disable plugin review.
-- `/auto-review status`: show the enabled state, the model, the backup chain, the jev prefilter (switch, model, threshold, key source, endpoint, timeouts), the Bash exemption master switch, the preset and additional rules, the review-log path, the configuration path, timeouts, retry settings and the override boundaries.
+- `/auto-review status`: show the enabled state, the model, the backup chain, the jev prefilter (switch, omp judge candidates, threshold, timeouts), the Bash exemption master switch, the preset and additional rules, the review-log path, the configuration path, timeouts, retry settings and the override boundaries.
 - `/auto-review model <provider/model>`: verify the model exists and save it to the user configuration file; a model of the same name is removed from the backup chain, and credentials stay managed by omp.
 - `/auto-review bash on` / `/auto-review bash off`: save and immediately toggle the Bash exemption master switch without touching the preset or the additional rules; reloading cancels reviews in flight.
-- `/auto-review jev on` / `/auto-review jev off`: save and immediately toggle the jev prefilter. When the configuration has no `jev` block, `jev on` writes the defaults from the table below so that only the key is left to provide; if no key can be found, the reply warns that the prefilter will be skipped.
+- `/auto-review jev on` / `/auto-review jev off`: save and immediately toggle the jev prefilter. When the configuration has no `jev` block, `jev on` writes the defaults from the table below. The reply lists all available native candidates in omp's `judge` chain, or warns if there are none. Listing candidates does not resolve request credentials or command-backed headers, and is not an authentication or connectivity check.
 - `/auto-review reload`: reload the configuration and cancel reviews still in flight.
 
 When the configuration is missing or invalid, recognised plain reads and edits keep working, operations that need review go to a human confirmation, and are blocked when there is no interactive UI. The status bar then shows a not-ready state. While the configuration is invalid, `/auto-review on|off`, `bash on|off` and `jev on|off` are all refused: fix the configuration and reload first, so a file is never overwritten with fallback defaults.
@@ -128,7 +128,7 @@ When the reviewer model is not configured, trusted user task context is missing,
 
 ## jev prefilter
 
-[TypeSafe jev](https://docs.typesafe.ai/) is a System One model: it does not generate text, it returns a probability distribution and a confidence over the options you define. This plugin uses it as a prefilter layer — every call entering model review first asks jev one Choice question (`allow` / `deny`), and when the winning option's probability reaches the trust threshold, that verdict is used directly with no LLM call; otherwise the same redacted context goes to the LLM review chain.
+The jev prefilter asks one native Choice question (`allow` / `deny`) per call entering model review. Native judgment APIs, including [TypeSafe jev](https://docs.typesafe.ai/), return option probabilities and confidence rather than a verdict reason. An answer that passes both gates below decides the call without an LLM request; otherwise the same redacted context goes to the LLM review chain.
 
 The prefilter is off by default. Add a `jev` block to the user-level `auto-review.json` and run `/auto-review reload`, or run `/auto-review jev on` to write the defaults:
 
@@ -137,9 +137,6 @@ The prefilter is off by default. Add a `jev` block to the user-level `auto-revie
   "model": "YOUR_PROVIDER/YOUR_MODEL_ID",
   "jev": {
     "enabled": true,
-    "baseUrl": "https://api.typesafe.ai/v1/systemone",
-    "model": "jev-latest",
-    "apiKeyEnv": "TYPESAFE_API_KEY",
     "confidenceThreshold": 0.85,
     "timeoutMs": 5000,
     "retryCount": 1,
@@ -151,49 +148,56 @@ The prefilter is off by default. Add a `jev` block to the user-level `auto-revie
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Prefilter switch; `false` keeps the other fields but never calls jev, behaving exactly as if unconfigured |
-| `baseUrl` | `https://api.typesafe.ai/v1/systemone` | Evaluation endpoint. Must be an absolute https URL; plain http is accepted only for `localhost`/`127.0.0.1`/`[::1]` (for local proxies and tests). Embedded credentials, query strings and fragments are rejected |
-| `model` | `jev-latest` | A jev model name or alias such as `jev-latest` or `jev-1.13.0`; no `provider/` prefix, and unrelated to the omp registry |
-| `apiKeyEnv` | `TYPESAFE_API_KEY` | Name of the environment variable holding the key; it wins over `apiKey` |
-| `apiKey` | unset | Optional inline key fallback, used only when the environment variable is absent; prefer the environment variable |
 | `confidenceThreshold` | `0.85` | Trust threshold, must be greater than `0.5` and at most `1`; compared against the winning option's probability |
-| `timeoutMs` | `5000` | Timeout of a single jev call, 30000 maximum |
-| `retryCount` | `1` | Extra retries, 0–3; only retryable failures are retried, see [Failures and degradation](#failures-and-degradation) |
+| `timeoutMs` | `5000` | Upper bound for one plugin attempt on a native candidate, including authentication, headers and SDK transport retries; 30000 maximum |
+| `retryCount` | `1` | Extra plugin retries per native candidate, 0–3; only retryable failures are retried, see [Failures and degradation](#failures-and-degradation) |
 | `retryDelayMs` | `500` | Milliseconds to wait before a retry, 0–10000 |
+
+The decision models come from omp's effective `judge` role chain, including `retry.fallbackChains.judge` or the host's default fallbacks. For example, merge this into your omp configuration and configure that provider's authentication in omp:
+
+```yaml
+modelRoles:
+  judge: typesafe/jev-latest
+```
+
+The plugin keeps only candidates whose `api` is a native judgment API: `typesafe`, `openrouter-decisions`, `workers-ai-systemone` or `openai-decisions` in the targeted SDK. Chat/tiny candidates are skipped, not asked to generate probabilities. Native candidates are tried in host order until one returns a valid answer; a valid low-confidence answer ends the native chain and escalates to the LLM, rather than seeking another native answer.
+
+**Migrating an older configuration:** remove `jev.baseUrl`, `jev.model`, `jev.apiKeyEnv` and `jev.apiKey` from `auto-review.json`. Move model selection to omp's `modelRoles.judge` and endpoint/credential configuration to the corresponding omp provider. A custom System One provider's `baseUrl` is the API root; the SDK appends `/v1/systemone`. Removed plugin fields are rejected as unknown fields, including in disabled blocks; fix the file before running `/auto-review reload` or toggle commands. The plugin does not migrate or silently ignore them.
 
 ### How the threshold is applied
 
-A two-option Choice returns exactly **one** `confidence` (derived from how peaked the distribution is); the per-option numbers live in `probabilities`. The gate therefore compares the **winning option's probability** against the threshold:
+A two-option Choice has one answer-level `confidence`, separate from the per-option values in `probabilities`. The gate checks both values independently:
 
-- `probabilities[choice] ≥ confidenceThreshold` and `confidence ≥ 0.5` → **act on jev's choice**: `allow` goes on to OMP's own approval and executes, `deny` blocks outright, and neither opens a human confirmation window. `0.5` is the uncertainty floor from the TypeSafe documentation, which is also why the threshold itself must be greater than `0.5`.
+- `probabilities[choice] ≥ confidenceThreshold` and `confidence ≥ 0.5` → **act on jev's choice**: `allow` goes on to OMP's own approval, `deny` blocks outright, and neither opens this plugin's human confirmation window. The winning-probability threshold must be greater than `0.5` to exclude an even split; the separate confidence floor accepts exactly `0.5`.
 - Otherwise this counts as "jev is not sure", and the call goes to the LLM review chain with the human confirmation window and every other existing behaviour unchanged. The prompt explicitly asks jev to leave the two probabilities close together when it cannot tell the options apart, instead of forcing a pick.
 
 jev only produces `allow` and `deny`, never `ask`, and therefore never a `recommendation`; the `recommendationTimeoutMs` automatic decision applies to the LLM path only.
 
-**A deny inside the threshold is final.** The blocked call returns the locally composed reason to the agent as a tool error, so it can adjust its approach or explain the situation to you, but this call gets no `仅批准本次调用` ("approve this call only") opportunity. The threshold is therefore where you set your tolerance for this layer's mistakes: raising `confidenceThreshold` sends more calls to the LLM for a second opinion and keeps the human window, while lowering it hands more of the decision to the prefilter. Use `/auto-review jev off` to withdraw this layer's authority temporarily.
+**A trusted deny is final.** The blocked call returns the locally composed reason to the agent as a tool error, so it can adjust its approach or explain the situation to you, but this call gets no `仅批准本次调用` ("approve this call only") opportunity. Raising `confidenceThreshold` routes more calls to the LLM path and its normal confirmation policy; lowering it gives the prefilter more authority. Use `/auto-review jev off` to withdraw this layer's authority temporarily.
 
 Because jev does not grade risk, the prefilter path produces no `risk` and no `authorization`, so the "an `allow` at high or critical risk is downgraded to `ask`" protection in `parseVerdict` applies to the LLM path only.
 
-Measured behaviour, for reference: on clear-cut calls (an in-scope `npm test`, an out-of-scope `rm -rf ~/Documents`, a `bash deploy.sh --prod` whose effect is unknown, and a POST of a credentials file to an external address), `jev-1.13.0` returned saturated distributions — winning probability and confidence both `1` — with the correct decision in each case, in roughly 0.3–0.9 seconds and about 1000 input tokens per call. In other words the default `0.85` threshold is not the binding constraint on such calls, and falling back to the LLM happens only on genuinely ambiguous input. Sample your own kinds of operations before settling on a threshold.
+Probability and confidence are routing signals, not an accuracy guarantee. Sample your intended operations with your selected judgment provider before choosing a threshold; the plugin does not guarantee lower cost, lower latency or correct decisions.
 
 ### Reasons are composed locally
 
-jev returns no text, so the Chinese reason in the audit, the review log and the tool error of a blocked call is generated entirely by the plugin from a template, for example:
+The plugin does not use model-generated reason text from native answers. The Chinese reason in the audit, the review log and the tool error of a blocked call is generated locally from the gate and the answering model, for example:
 
 ```text
-前置审查（jev-1.13.0）判定可放行：胜出概率 0.95 ≥ 阈值 0.85（confidence 0.9）
+前置审查（typesafe/jev-1.13.0）判定可放行：胜出概率 0.95 ≥ 阈值 0.85（confidence 0.9）
 ```
 
-("Prefilter (jev-1.13.0) judged this allowable: winning probability 0.95 ≥ threshold 0.85 (confidence 0.9)".)
+("Prefilter (typesafe/jev-1.13.0) judged this allowable: winning probability 0.95 ≥ threshold 0.85 (confidence 0.9)".)
 
-The question and option descriptions sent to jev are written in English, since the official documentation notes English is where accuracy is best while CJK is supported less well and relies more on confidence routing. The `state` is exactly the same redacted payload the LLM review receives, sent as a JSON object.
+The fixed question instructions and option criteria are written in English. The `state` is the same redacted review payload the LLM receives, passed to the native SDK as a JSON object.
 
 ### Failures and degradation
 
-When the block is absent, `enabled: false`, or no key can be found, the prefilter is skipped silently and behaviour is identical to before. When it is configured but the call fails, the review degrades to the LLM chain while the failure category is still written into the `attempts` diagnostics and the audit, so a key or quota problem stays visible:
+When the block is absent, `enabled: false`, or the host's effective role chain has no available native candidates, no prefilter attempt or `prefilter` record is produced. An enabled prefilter with no candidates is reported as a warning by `/auto-review status` and `jev on`. Candidate availability is the host's cached availability check, not proof that credentials will resolve or the endpoint will accept them. If a selected candidate fails, the chain tries later native candidates and then the LLM; attempts keep fixed failure categories:
 
-| Situation | Category | Retried |
+| Situation | Category | Plugin retries on this candidate |
 | --- | --- | --- |
-| 401 / 403 | authentication failure | no |
+| Missing credential during an attempt, or final 401 / 402 / 403 | authentication failure | no |
 | 422 request body rejected | invalid response format | no |
 | 429 rate limited / 529 overloaded | rate limited | yes |
 | Other non-2xx, network errors | endpoint or network error | yes |
@@ -201,13 +205,15 @@ When the block is absent, `enabled: false`, or no key can be found, the prefilte
 | Response larger than 64 KiB | output limit reached | no |
 | Longer than `timeoutMs` | timeout | yes (within budget) |
 
+The table describes plugin retries, not individual HTTP requests. The native SDK may rotate credentials or retry transport requests inside one plugin attempt, so `retryCount: 0` does not guarantee one HTTP request. These requests and waits remain bounded by that attempt's signal and the shared prefilter budget. Non-retryable failures skip to the next native candidate.
+
 Redirects are always refused, so the key cannot be forwarded to another host; error information keeps only the fixed category and never includes the response body.
 
-With jev configured but no `model`, the plugin still works: inside the threshold jev decides, and outside it the call is recorded as `preflightError: "prefilter_low_confidence"` and goes to a human confirmation.
+With jev enabled but no LLM `model`, a trusted native answer can still decide the call. A valid answer that fails either gate is recorded as `preflightError: "prefilter_low_confidence"`; no candidate or exhausted failed candidates instead produce `model_not_configured`. Both go to a human confirmation when available, and block without an interactive UI; any completed prefilter attempts are retained.
 
 ### Time budget
 
-The prefilter **shares** `reviewTimeoutMs` instead of extending the total, so the "review plus human confirmation ≤ 110 seconds" constraint and all existing configurations are unaffected. Configuration validation requires `timeoutMs × (retryCount + 1) + retryDelayMs × retryCount` to be strictly smaller than `reviewTimeoutMs`, which guarantees the LLM chain always gets time; the default combination is 10500ms < 20000ms. Whatever the prefilter does not use is left to the LLM chain. `/auto-review status` displays that worst-case share.
+The prefilter **shares** `reviewTimeoutMs` instead of extending it, preserving the "review plus human confirmation ≤ 110 seconds" constraint. Its total cap is `timeoutMs × (retryCount + 1) + retryDelayMs × retryCount`, and validation requires that cap to be strictly smaller than `reviewTimeoutMs`; the default is 10500ms < 20000ms. This is one cap for all native candidates, not a separate allowance per model. Each candidate shares the remaining time with later candidates, and its authentication, header resolution, SDK retries and plugin retries all consume its slice. Whatever the prefilter does not use is left to the LLM chain. `/auto-review status` displays the configured cap.
 
 ### Audit and status
 
@@ -216,7 +222,7 @@ The audit and the optional review log gain a `prefilter` field:
 ```json
 {
   "prefilter": {
-    "model": "jev-1.13.0",
+    "model": "typesafe/jev-1.13.0",
     "decision": "allow",
     "probability": 0.95,
     "confidence": 0.9,
@@ -228,7 +234,7 @@ The audit and the optional review log gain a `prefilter` field:
 }
 ```
 
-`status` is `decided` (jev's verdict was used), `escalated` (an answer arrived but below the threshold) or `unavailable` (no answer arrived). `model` records the versioned ID reported in the response. When jev produces the verdict, the record's `model` is `jev:<versioned id>` (such as `jev:jev-1.13.0`) and the entry in `attempts` is named `jev:<configured model name>`, so neither can be confused with a `provider/model` LLM. The key, the endpoint and response bodies are never written to any log.
+`status` is `decided` (the prefilter's verdict was used), `escalated` (a valid answer failed either gate) or `unavailable` (all attempted candidates failed). `prefilter.model` records the answering candidate's provider plus a validated backend model ID, falling back to the selected candidate's ID when the backend ID is missing or invalid; an unavailable record names the first candidate. When jev decides, the outer record's `model` is `jev:<provider/id>` (such as `jev:typesafe/jev-1.13.0`), while `attempts[].model` retains the configured candidate (`jev:typesafe/jev-latest`). With no native candidate there is no `prefilter` field. Connection credentials, endpoint URLs and raw response bodies are omitted from prefilter diagnostics.
 
 When jev itself produced the verdict, the status bar names the source, for example `审核通过（jev 前置） · bash: npm test` ("review passed (jev prefilter)") or `审核拒绝（jev 前置）` ("review rejected (jev prefilter)"). The marker is omitted when low confidence sent the call to the LLM, and a human approval is still reported as `人工放行` ("approved by human").
 
@@ -239,9 +245,11 @@ The recognised built-in Bash tool skips the reviewer when the master switch is o
 The `common` read-only preset is enabled by default, and `bashAllowCommands` adds to it rather than replacing it:
 
 ```json
-"bashBypassEnabled": true,
-"bashReadonlyPreset": "common",
-"bashAllowCommands": []
+{
+  "bashBypassEnabled": true,
+  "bashReadonlyPreset": "common",
+  "bashAllowCommands": []
+}
 ```
 
 | Master switch | Preset | Effective rules |
@@ -327,7 +335,7 @@ If you want this plugin to own the day-to-day confirmation prompts, you can choo
 
 A sub-agent that inherits extensions normally reviews its own tool calls, with review records separated per session. The plugin obtains the ancestor session's user instruction through the real parent/child relationship in the host's `AgentRegistry`, and marks the sub-task assignment text as an agent injection that cannot prove user authorization. When the parent session's user instruction changes, pending approvals in the child session are invalidated as well; when the relationship cannot be verified and user context is missing, the call goes to a human. When a sub-agent without a TUI is rejected, the tool error carries the reason so the main agent can adjust its approach or explain it to the user.
 
-**Sub-agents with a restricted tool set are a known exception.** omp clears the extension list on the `restrictToolNames` path, so a pure plugin can only review the parent's task dispatch and cannot review that sub-agent's internal operations one by one. Restricted sub-tasks in plan mode may take the same path. Do not read a parent task approval as meaning the internal commands were reviewed. [Upstream implementation](https://github.com/can1357/oh-my-pi/blob/v18.1.16/packages/coding-agent/src/task/executor.ts)
+**Restricted tool sets do not by themselves remove inherited review hooks in `18.10.3`.** The host suppresses fresh extension discovery and extension-provided tool admission, but rebinds the parent's prepared extension factories into restricted children, including plan-mode children. An SDK caller that creates a restricted session without passing those prepared extensions does not load the plugin there. Coverage therefore depends on actual extension inheritance; approving a parent's task dispatch is not proof that its child's operations were reviewed. See the [session loading branch](https://github.com/can1357/oh-my-pi/blob/v18.10.3/packages/coding-agent/src/sdk.ts) and [child construction](https://github.com/can1357/oh-my-pi/blob/v18.10.3/packages/coding-agent/src/task/executor.ts).
 
 This is a pre-execution review layer, not an OS sandbox:
 
@@ -335,21 +343,21 @@ This is a pre-execution review layer, not an OS sandbox:
 - The extension runs in the same process as omp, so it cannot prevent other malicious extensions, host code, or uninstalling this plugin from bypassing review. Source identification depends on host metadata; if an SDK inline-replaces a tool and the host still marks it as a native built-in, the plugin cannot tell the difference. Use trusted extensions, and place the review plugin after extensions that modify tool inputs where possible; later extensions rewriting already-reviewed input is not supported.
 - An ordinary file edit may trigger host-internal behaviour such as formatting or LSP; the plugin reviews the outer tool call and does not intercept every system call.
 - Terminal commands you run by hand are out of scope for this first version.
-- The model can still misjudge or be influenced by prompt injection. Provenance labelling and the review prompt reduce the risk but are not a formal security guarantee. With the jev prefilter enabled, calls inside the threshold are decided entirely by jev — `allow` releases directly and `deny` blocks directly, neither with a human confirmation window — so the threshold is your tolerance for that layer's mistakes: raising `confidenceThreshold` sends more calls to the LLM for a second opinion and restores the human window, and lowering it hands more of the decision to the prefilter. Use a container or an OS sandbox when you need strict isolation.
+- The model can still misjudge or be influenced by prompt injection. Provenance labelling and the review prompt reduce the risk but are not a formal security guarantee. A prefilter answer that passes both gates decides the call without a plugin confirmation window; a trusted `allow` still cannot override OMP's own approval. Raising the probability threshold routes more calls to the normal LLM path, while lowering it gives the prefilter more authority. Use a container or an OS sandbox when you need strict isolation.
 
 ## Privacy and audit
 
 Review sends a redacted copy of the full operation, the cwd, the most recent user instruction and the relevant history that fits the budget. Tool results, assistant text and summaries are labelled as untrusted data; only intent the user expressed directly can constitute authorization. History may be omitted, but the current operation and the latest user instruction are never silently truncated before being handed to a model for approval. Anything over budget goes to a human confirmation; parameters larger than 128 KiB that cannot be displayed safely are blocked outright with a request to split the operation.
 
-**Enabling the jev prefilter adds an outbound destination.** The redacted operation, the cwd and the latest user instruction are sent over HTTPS to `jev.baseUrl` (`api.typesafe.ai` by default), a third-party service distinct from the provider configured in omp, billed against your own TypeSafe key. Without a `jev` block, nothing is ever sent to that address. The TypeSafe documentation states that jev is not trained on customer requests, with zero data retention available for enterprise customers; whether that destination is acceptable is your decision. The key is read from the environment variable named by `apiKeyEnv` or from `apiKey`, appears only in the request header, and is never written to the status bar, the audit, the review log or error messages — `/auto-review status` shows only the key's source.
+**Enabling the jev prefilter sends review state to the selected judgment providers.** The redacted operation, cwd, latest user instruction and included history go to the native candidates resolved through omp's `judge` role chain, including fallbacks that may use another provider. Without a `jev` block, with `enabled: false`, or with no available native candidate, no prefilter request is sent. Check the data retention and training terms of every configured judgment provider before enabling it; the plugin does not enforce those terms. Credentials and provider/model headers are resolved by omp, not stored in `auto-review.json` or included in prefilter diagnostics.
 
 Redaction covers common tokens, authentication headers, password assignments, nested credential fields and private keys. It is a heuristic filter and cannot recognise arbitrary custom or encoded secrets; the destination is determined by the review provider you choose. The human window is local and shows the actual operation parameters so you can check them.
 
-Audit files live in `getAgentDir()/auto-review/audit/YYYY-MM-DD.jsonl`, with new directories at `0700` and new files at `0600`. Each record holds the session, the call ID, parameter field names and byte counts, a SHA-256, the reviewer model (the model that produced the verdict on success, the last attempted model on failure; `jev:<versioned id>` plus a `prefilter` block when jev decided; `fallbackUsed: true` for a backup; `null` plus `bypassRule` for a rule exemption), the per-attempt `attempts`, the prefilter result `prefilter`, the decision, the redacted reason, the elapsed time and the human override result. An `ask` recommendation is stored redacted in `recommendation`, and an automatic decision adds `automaticRecommendation`. Raw commands, the full review context and authentication keys are never written.
+Audit files live in `getAgentDir()/auto-review/audit/YYYY-MM-DD.jsonl`, with new directories at `0700` and new files at `0600`. Each record holds the session, the call ID, parameter field names and byte counts, a SHA-256, the reviewer model (the model that produced the verdict on success, the last attempted model on failure; `jev:<provider/id>` plus a `prefilter` block when jev decided; `fallbackUsed: true` for an LLM backup; `null` plus `bypassRule` for a rule exemption), the per-attempt `attempts`, the prefilter result `prefilter`, the decision, the redacted reason, the elapsed time and the human override result. An `ask` recommendation is stored redacted in `recommendation`, and an automatic decision adds `automaticRecommendation`. Raw commands, the full review context and authentication keys are never written.
 
 `outcome` is this plugin's approval result and does not mean the tool executed successfully; OMP's own approval or a cancellation can still prevent execution. A call is never released when the audit write fails. Logs are split per date, and this first version never deletes old logs — archive them yourself as needed.
 
-A preparation failure is still recorded as `decision: "error"`, plus a `preflightError`: `model_not_configured`, `missing_user_context`, `operation_too_large`, `user_instruction_too_large`, or `prefilter_low_confidence` (the prefilter was not confident enough and no LLM reviewer is configured). Except for `prefilter_low_confidence`, these records have `model: null` and no `attempts`, and `reason` is the specific fixed cause, which distinguishes them from model call failures. `prefilter_low_confidence` keeps jev's attempt and its `prefilter` record, so its `model` is `jev:<model name>`. With a model configured or the prefilter enabled, the optional review log records the same fields and reasons.
+A preparation failure is still recorded as `decision: "error"`, plus a `preflightError`: `model_not_configured`, `missing_user_context`, `operation_too_large`, `user_instruction_too_large`, or `prefilter_low_confidence` (a valid prefilter answer failed the gates and no LLM reviewer is configured). With no model attempt, the record has `model: null` and no `attempts`; otherwise completed prefilter attempts and their `prefilter` record are retained, even for `model_not_configured`. The fixed `reason` distinguishes preparation failures from provider-call failures. On this failure path, the outer `model` is the last attempted candidate (`jev:<provider/id>`), not a deciding model. With a model configured or the prefilter enabled, the optional review log records the same fields and reasons.
 
 ### Optional command review log
 
@@ -371,7 +379,7 @@ New directories are `0700` and new files `0600`; the log is append-only and is n
 
 ## Development and verification
 
-Development needs Node.js ≥ 22.12; real-host tests additionally need `omp 18.1.16`, Python 3 and a POSIX PTY. An installed omp brings its own runtime, so using the plugin itself needs no dev dependencies.
+Development needs Node.js ≥ 22.12; real-host tests additionally need `omp 18.10.3`, Python 3 and a POSIX PTY. An installed omp brings its own runtime, so using the plugin itself needs no dev dependencies.
 
 `test:omp` uses the pinned omp in `node_modules` by default. That is a Bun script, so it needs Bun ≥ 1.3.14 on PATH; alternatively set `OMP_BIN` to an omp binary that bundles its own runtime and drop the dependency.
 
@@ -384,10 +392,12 @@ npm run test:omp
 
 Unit tests cover risk triage, strict JSON, context provenance and redaction, symlinks, configuration and retry parameter validation, the review master switch (defaults, type validation, no policy/model/UI/log work while off, the switch command), auditing, exceptions, timeouts, cancellation, single-use authorization, recommendation validation and option labelling, window expiry protection, automatic decisions on timeout, the backup chain and its time sharing, same-model retries and backoff, insufficient retry budget and cancellation, failed-attempt diagnostics, preparation failures (fixed reasons, no model attempt, no error text leaking), the status summary and concurrent confirmations. Bash exemption has its own coverage: the master switch/preset/additional rule configuration matrix, exact command matching, safe compound commands and pipelines, rejection of dangerous shell syntax/paths/execution modifiers, the hardening rewrite, exemption audits without a model call, and falling back to model review when a Git filter is configured. The optional review log is covered separately: path validation and save/reload, all four decisions persisted before the human confirmation, redaction of full commands and nested credentials, file permissions, appending via an absolute path, and no writes when it is off, when a call is exempt or when no model is configured, plus a blocked call on a write failure.
 
-The jev prefilter has its own coverage (`test/jev.test.ts`, `test/prefilter.test.ts`): the configuration matrix (endpoint protocol and embedded credentials, model name shape, the 0.5 threshold floor, key fields never echoed, the budget being smaller than `reviewTimeoutMs`, round-trip preservation), the request body matching the documented structure, a redacted `state`, strict answer validation (missing fields, out-of-range or miscounted probabilities, `choice` not being the highest-probability option, a noul answer), the threshold and 0.5-floor boundaries, and reasons composed locally with a refusal to produce a verdict from an untrusted gate. The transport layer is verified against a local `node:http` server: request headers and method, no retry on 401/403/422, backoff retries on 429/529, timeout abort, cancellation propagation, refused redirects (with zero requests to the redirect target), the 64 KiB cap, key precedence, and keys staying out of diagnostics. The chain layer verifies zero LLM calls on a trusted allow, a trusted deny blocking with no confirmation window, an uncertain deny still keeping the human window, the LLM producing the verdict when confidence is low, degradation on a failed call with both layers' diagnostics preserved, the decision and `prefilter_low_confidence` for a jev-only setup, unchanged behaviour when the prefilter is off or unconfigured, budget sharing and handover of the remaining time, and the `prefilter` field in the audit and review log with no key present.
+The jev unit and chain tests (`test/jev.test.ts`, `test/prefilter.test.ts`) cover policy validation and removed-field rejection, payload redaction, strict answer validation, separate probability/confidence boundaries, locally composed reasons, native candidate order and model identities, retries, cancellation and shared budgets. They also cover trusted allow/deny without LLM calls or confirmation windows, uncertain answers and failed candidates handing over to the LLM, jev-only preparation failures, disabled/empty candidate paths, and preserved audit/review-log diagnostics. These tests inject native candidates; they do not call a paid judgment service.
 
-`test:omp` copies a plugin package **without node_modules** into a temporary directory and uses a real omp with a local mock provider to verify approval, rejection, an invalid response, an unconfigured model, preparation failures (no model call when the operation or the user instruction exceeds its budget, the fixed reason in the audit and review log, and that reason returned as the tool error), the plugin master switch being off (the original call is released and no audit or review log is written), native approval, an ordinary sub-agent, review of a `write` that forwards execution through `xd://`, the rewrite and audit of read-only Bash exemption rules (`model: null` plus `bypassRule`), the exemption master switch being off, exemption of safe compound commands and text pipelines, dangerous compound commands falling back to model review, falling back to review when a Git filter is configured, a native `deny` still blocking an exempt command, a backup taking over when the primary is missing/times out/returns an invalid response, a valid verdict not triggering a switch, getting a verdict after a same-model retry or switching to the backup once retries are exhausted, the whole chain failing into a human confirmation with per-attempt diagnostics, and a real TUI's approval/explicit rejection/cancellation plus automatic release or rejection following the model's recommendation. The jev prefilter adds its own scenarios: a locally mocked jev endpoint wired in through `jev.baseUrl` verifies that a trusted allow is released without calling the mock LLM, that a trusted deny opens no confirmation window in a real TUI and blocks, that low confidence hands over to the LLM, that a 401 degrades while keeping the failure category in the audit, that a jev-only setup with low confidence records `prefilter_low_confidence` and goes to a human, and that `enabled: false` behaves exactly like an unconfigured prefilter. Models are simulated in memory by a test extension and the jev endpoint by a local HTTP server, so neither consumes paid quota; your omp configuration is never modified. The non-inheritance boundary of restricted sub-agents has a separate regression check based on the pinned SDK sources.
+`test:omp` copies a plugin package **without node_modules** into a temporary directory and launches a real omp with an in-memory mock provider. General scenarios exercise review approval/rejection and failure, preparation failures, the master switch, native approval, ordinary sub-agents, nested `xd://` execution, Bash exemptions and hardening, LLM fallback/retry diagnostics, and real TUI approval, rejection, cancellation and automatic recommendations.
+
+Native judgment scenarios use a local HTTP endpoint selected through omp's `judge` role. They exercise trusted allow/deny (including a TUI deny without a confirmation window), low-confidence handover, authentication failures and 402 quota errors, jev-only preparation failures, disabled/chat-only/missing-host-credential paths, refused redirects, oversized responses rejected at the 64 KiB limit, malformed responses, credential/header routing, and audit/review-log redaction. The mock models and local endpoint consume no paid quota, and the suite uses isolated omp configuration rather than modifying yours.
 
 Set `OMP_BIN=/path/to/omp` to choose the binary, `OMP_SMOKE_CASES=child` to run scenarios individually (`fallback-*` for backup models, `retry-*` for same-model retries, `bypass-*` for Bash exemption, `preflight-*` for preparation failures, `jev-*` for the prefilter, `disabled` for the plugin master switch), and `KEEP_SMOKE_ARTIFACTS=1` to keep test artifacts; artifact paths are retained automatically on failure.
 
-Interface references: [extension interface](https://github.com/can1357/oh-my-pi/blob/v18.1.16/docs/extensions.md), [extension loading rules](https://github.com/can1357/oh-my-pi/blob/v18.1.16/docs/extension-loading.md).
+Interface references: [extension interface](https://github.com/can1357/oh-my-pi/blob/v18.10.3/docs/extensions.md), [extension loading rules](https://github.com/can1357/oh-my-pi/blob/v18.10.3/docs/extension-loading.md).

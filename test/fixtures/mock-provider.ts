@@ -1,20 +1,30 @@
-// Loaded only by the isolated real-OMP smoke suite. No network or real credentials.
+// Isolated real-OMP smoke fixture: synthetic credentials; native judge HTTP stays on loopback.
 import { appendFileSync } from "node:fs";
-import { createMockModel, Effort, type Api, type MockResponse } from "@oh-my-pi/pi-ai";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { Effort, type Api } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function mockProvider(pi: ExtensionAPI) {
   const scenario = process.env.OMP_REVIEW_TEST_CASE!;
   const reviewCounts = new Map<string, number>();
   pi.registerProvider("review-test", {
-    baseUrl: "https://example.invalid", apiKey: "local-test-credential", api: "review-test-api" as Api,
-    models: ["main", "reviewer", "backup", "child"].map(id => ({
-      id, name: id, reasoning: id === "backup" || (id === "reviewer" && scenario === "allow"), input: ["text"] as "text"[],
-      ...(id === "backup" || (id === "reviewer" && scenario === "allow") ? {
-        thinking: { mode: "effort" as const, efforts: [Effort.Max, Effort.High] },
-      } : {}),
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100_000, maxTokens: 4096,
-    })),
+    baseUrl: process.env.OMP_REVIEW_JEV_BASE_URL || "https://example.invalid",
+    apiKey: scenario.startsWith("jev-") ? "smoke-test-key" : "local-test-credential", api: "review-test-api" as Api,
+    headers: { "x-smoke-provider": "native-route" },
+    models: [
+      ...["main", "reviewer", "backup", "child"].map(id => ({
+        id, name: id, reasoning: id === "backup" || (id === "reviewer" && scenario === "allow"), input: ["text"] as "text"[],
+        ...(id === "backup" || (id === "reviewer" && scenario === "allow") ? {
+          thinking: { mode: "effort" as const, efforts: [Effort.Max, Effort.High] },
+        } : {}),
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100_000, maxTokens: 4096,
+      })),
+      ...(scenario.startsWith("jev-") && scenario !== "jev-no-key" ? [{
+        id: "jev-latest", name: "Native smoke judge", api: "typesafe" as const, kind: "judge" as const,
+        reasoning: false, input: ["text"] as "text"[], headers: { "x-smoke-model": "judge-only" },
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100_000, maxTokens: 4096,
+      }] : []),
+    ],
     streamSimple(model, ctx, options) {
       let response: MockResponse;
       if (model.id === "reviewer" || model.id === "backup") {

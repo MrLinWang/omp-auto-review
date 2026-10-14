@@ -2,13 +2,13 @@
 
 [English](README.md) | **简体中文**
 
-让独立模型在 oh-my-pi 执行工具前审核操作；已知内置的读取/编辑走本地快速通道，命中规则的内置只读 Bash 查询免审执行，其余调用先由可选的 TypeSafe jev 前置审查判断，置信度不足时再交给配置的 LLM 审核链。面向 `omp 18.1.16`，通过官方 `tool_call` 扩展接口工作，不修改 omp 核心。
+让独立模型在 oh-my-pi 执行工具前审核操作；已知内置的读取/编辑走本地快速通道，命中规则的内置只读 Bash 查询免审执行，其余调用进入可选的原生 judgment 前置审查（jev），无法判定时再交给配置的 LLM 审核链。面向 `omp 18.10.3`，通过官方 `tool_call` 扩展接口工作，不修改 omp 核心。
 
 ```text
 工具调用 → 本地分流 ─┬→ 免审的读取/编辑 → 执行
                      ├→ 命中只读 Bash 免审规则 → 加固命令 → omp 原生审批 → 执行
                      └→ jev 前置审查（可选，单个 Choice 问题）
-                        ├→ 胜出概率 ≥ 可信阈值 → 按 jev 的选择执行
+                        ├→ 胜出概率 ≥ 可信阈值且 confidence ≥ 0.5 → 按 jev 的选择执行
                         │   ├→ allow → omp 原生审批 → 执行
                         │   └→ deny → 直接阻止（不弹人工确认）
                         └→ 置信不足 / 调用失败 / 未配置
@@ -37,7 +37,7 @@ omp --extension /absolute/path/to/omp-auto-review \
 
 模型和认证复用 omp 注册表，支持已有 provider、用户配置的 provider，以及其 API key/OAuth 认证解析。审核请求不携带工具定义。调用失败时先在同一模型上重试，再按顺序尝试备用模型，全部失败后转人工确认。
 
-想让大部分调用由更快更便宜的模型判断，可另外启用 [jev 前置审查](#jev-前置审查)：设置 `TYPESAFE_API_KEY` 环境变量后执行 `/auto-review jev on`，阈值内的调用由 jev 直接判定，阈值外仍由上面配置的 LLM 审核链处理。它的接口和密钥独立于 omp 注册表。
+启用可选的 [jev 前置审查](#jev-前置审查)时，给 omp 的 `judge` 角色配置可用的原生 judgment 模型，再执行 `/auto-review jev on`。宿主提供模型、端点、凭据和 provider/model headers；插件只配置门控与重试策略。可信答案直接决定本次调用，置信不足或原生候选全部失败时交给上面配置的 LLM 审核链。
 
 长期使用可在用户级 omp `config.yml` 的现有 `extensions` 列表末尾**追加**插件绝对路径，并合并超时配置：
 
@@ -63,7 +63,7 @@ extensionHandlers:
 | --- | --- | --- |
 | `enabled` | `true` | 插件审核总开关；`false` 时跳过插件审核，保留其他配置 |
 | `model` | 未设置 | 完整 `provider/model`，精确匹配 |
-| `jev` | 未设置（关闭） | 可选的 TypeSafe jev 前置审查配置块，见[前置审查](#jev-前置审查)；接口与密钥独立于 omp 模型注册表 |
+| `jev` | 未设置（关闭） | 可选的原生 judgment 前置审查策略，见[前置审查](#jev-前置审查)；候选来自 omp 的 `judge` 角色链，连接配置来自其模型注册表 |
 | `reviewLogPath` | 未设置（关闭） | 可选审查日志文件路径，按 JSONL 追加命令参数和模型结论；相对路径基于用户级 agent 配置目录 |
 | `bashBypassEnabled` | `true` | Bash 免审唯一总开关；`false` 时所有 Bash 调用进入审核 |
 | `bashReadonlyPreset` | `common` | `common` 启用内置常用只读规则，`off` 仅使用附加规则 |
@@ -78,7 +78,7 @@ extensionHandlers:
 | `maxOperationBytes` | `32768` | 发送给审核模型的完整操作大小上限 |
 | `maxContextBytes` | `24576` | 用户指令与近期历史的预算 |
 
-审核和确认超时之和不得超过 110 秒。排队也占用当前调用的总时间预算；不会因其他确认窗口排队而无限等待。宿主配套超时建议为 120 秒。`18.1.16` 的宿主还会在其管理的交互窗口显示期间暂停工具钩子预算，插件自身仍有独立的总超时限制。
+审核和确认超时之和不得超过 110 秒。排队也占用当前调用的总时间预算；不会因其他确认窗口排队而无限等待。宿主配套超时建议为 120 秒。`18.10.3` 的宿主还会在其管理的交互窗口显示期间暂停工具钩子预算，插件自身仍有独立的总超时限制。
 
 审核自动使用实际执行审核的模型声明支持的最低思考档位，按 `minimal < low < medium < high < xhigh < max` 选择，不依赖配置列表顺序；不支持推理或未声明可调档位的模型不传思考档位参数。已有档位映射由 OMP 处理。
 
@@ -114,10 +114,10 @@ extensionHandlers:
 每次模型尝试的模型名、结果类别和耗时记录在审计的 `attempts` 数组中；启用重试时另记 1 起算的 `attempt` 次数。链失败时，确认框显示最后尝试的模型，并列出各模型的失败原因（超时、模型未注册、认证失败、限流、响应格式无效、输出达到上限、响应未正常完成或接口异常）；`（备用）` 仅在最后尝试的模型不是主审核模型时显示，主模型自身重试不会触发该标记。原始接口错误和响应正文不写入诊断，避免泄露凭据。失败记录的 `model` 表示最后尝试模型；`fallbackUsed` 仍只表示备用模型成功给出了有效结论。没有开始模型尝试时不生成 `attempts`。
 
 - `/auto-review on` / `/auto-review off`：保存并立即开启或关闭插件审核。
-- `/auto-review status`：显示启用状态、模型、备用链、jev 前置审查（开关、模型、阈值、密钥来源、端点、超时）、Bash 免审总开关、预设及附加规则、审查日志路径、配置路径、超时、重试设置和覆盖边界。
+- `/auto-review status`：显示启用状态、模型、备用链、jev 前置审查（开关、omp 原生候选、阈值、超时）、Bash 免审总开关、预设及附加规则、审查日志路径、配置路径、超时、重试设置和覆盖边界。
 - `/auto-review model <provider/model>`：验证模型存在并保存到用户配置文件；同名模型会同时从备用链移除，凭据由 omp 管理。
 - `/auto-review bash on` / `/auto-review bash off`：保存并立即切换 Bash 免审总开关，不修改预设或附加规则；重载时取消在途审核。
-- `/auto-review jev on` / `/auto-review jev off`：保存并立即切换 jev 前置审查总开关。配置中没有 `jev` 块时，`jev on` 会写入上表默认值，只需另外提供密钥；找不到密钥时会提示前置审查将被跳过。
+- `/auto-review jev on` / `/auto-review jev off`：保存并立即切换 jev 前置审查总开关。配置中没有 `jev` 块时，`jev on` 会写入下表默认值。回复列出 omp `judge` 链中的全部可用原生候选，没有候选时给出警告。列出候选不会解析请求凭据或命令式 headers，也不代表鉴权或连接验证成功。
 - `/auto-review reload`：重新加载配置，同时取消尚未完成的审核。
 
 配置缺失或无效时，已知普通读取/编辑仍可使用；需要审核的操作转人工确认，无交互界面则阻止。状态栏会显示未就绪。配置无效时 `/auto-review on|off`、`bash on|off` 与 `jev on|off` 都会被拒绝，需先修复配置再重载，避免用回退默认值覆盖文件。
@@ -126,7 +126,7 @@ extensionHandlers:
 
 ## jev 前置审查
 
-[TypeSafe jev](https://docs.typesafe.ai/) 是 System One 模型：它不生成文本，而是针对你定义的选项返回概率分布和置信度。本插件把它作为前置审查层——每个进入模型审核的调用先问 jev 一个 Choice 问题（`allow` / `deny`），胜出选项的概率达到可信阈值就直接采用其结论，不再调用 LLM；否则把同一份脱敏上下文交给 LLM 审核链。
+jev 前置审查为每个进入模型审核的调用提出一个原生 Choice 问题（`allow` / `deny`）。包括 [TypeSafe jev](https://docs.typesafe.ai/) 在内的原生 judgment API 返回选项概率与 confidence，而不是裁决理由。答案同时通过下述两个门控时，不再调用 LLM，直接采用其结论；否则把同一份脱敏上下文交给 LLM 审核链。
 
 前置审查默认关闭。在用户级 `auto-review.json` 中加入 `jev` 块并执行 `/auto-review reload`，或直接执行 `/auto-review jev on` 写入默认值：
 
@@ -135,9 +135,6 @@ extensionHandlers:
   "model": "YOUR_PROVIDER/YOUR_MODEL_ID",
   "jev": {
     "enabled": true,
-    "baseUrl": "https://api.typesafe.ai/v1/systemone",
-    "model": "jev-latest",
-    "apiKeyEnv": "TYPESAFE_API_KEY",
     "confidenceThreshold": 0.85,
     "timeoutMs": 5000,
     "retryCount": 1,
@@ -149,47 +146,54 @@ extensionHandlers:
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
 | `enabled` | `true` | 前置审查开关；`false` 保留其余字段但不调用 jev，行为与未配置一致 |
-| `baseUrl` | `https://api.typesafe.ai/v1/systemone` | 评估端点，必须是 https 绝对 URL；仅 `localhost`/`127.0.0.1`/`[::1]` 允许 http（供本地代理和测试），不接受内嵌凭据、查询串或片段 |
-| `model` | `jev-latest` | jev 模型名或别名，例如 `jev-latest`、`jev-1.13.0`；不含 `provider/` 前缀，与 omp 注册表无关 |
-| `apiKeyEnv` | `TYPESAFE_API_KEY` | 读取密钥的环境变量名，优先于 `apiKey` |
-| `apiKey` | 未设置 | 可选的明文密钥回退，仅在环境变量缺失时使用；建议优先用环境变量 |
 | `confidenceThreshold` | `0.85` | 可信阈值，必须大于 `0.5` 且不超过 `1`；与胜出选项的概率比较 |
-| `timeoutMs` | `5000` | 单次 jev 调用超时，上限 30000 |
-| `retryCount` | `1` | 额外重试次数，0–3；只有可重试的失败会重试，见[失败与降级](#失败与降级) |
+| `timeoutMs` | `5000` | 单个原生候选的一次插件尝试的超时上限，包含认证、headers 与 SDK 传输重试；最大 30000 |
+| `retryCount` | `1` | 每个原生候选的额外插件重试次数，0–3；只有可重试失败会重试，见[失败与降级](#失败与降级) |
 | `retryDelayMs` | `500` | 重试前等待毫秒数，0–10000 |
+
+决策模型来自 omp 的有效 `judge` 角色链，包含 `retry.fallbackChains.judge` 或宿主默认备用链。例如把以下配置合并到 omp 配置，并在 omp 中配置该 provider 的鉴权：
+
+```yaml
+modelRoles:
+  judge: typesafe/jev-latest
+```
+
+插件只保留 `api` 为原生 judgment API 的候选：目标 SDK 中包括 `typesafe`、`openrouter-decisions`、`workers-ai-systemone`、`openai-decisions`。chat/tiny 候选会被跳过，不会要求它们生成概率。原生候选按宿主顺序尝试，首个有效答案结束原生链；有效但置信不足的答案直接转 LLM，不会继续寻找另一个原生答案。
+
+**旧配置迁移：** 从 `auto-review.json` 中删除 `jev.baseUrl`、`jev.model`、`jev.apiKeyEnv`、`jev.apiKey`。模型选择改放到 omp 的 `modelRoles.judge`，端点与凭据改由对应 omp provider 配置。自定义 System One provider 的 `baseUrl` 是 API 根地址，SDK 会追加 `/v1/systemone`。已移除的插件字段按未知字段拒绝，包括已关闭的配置块；修复文件后再执行 `/auto-review reload` 或开关命令。插件不会自动迁移或静默忽略它们。
 
 ### 阈值如何判定
 
-一个两选项的 Choice 只返回**一个** `confidence`（由概率分布的集中度导出），分选项的数值在 `probabilities` 里。因此门控取**胜出选项的概率**与阈值比较：
+一个两选项的 Choice 有一个答案级别的 `confidence`，与 `probabilities` 中各选项的数值分开。门控独立检查两个条件：
 
-- `probabilities[choice] ≥ confidenceThreshold` 且 `confidence ≥ 0.5` → **按 jev 的选择执行**：`allow` 交给 omp 原生审批后执行，`deny` 直接阻止，都不弹人工确认窗口。`0.5` 是 TypeSafe 文档给出的不确定性下限，因此阈值本身也必须大于 `0.5`。
+- `probabilities[choice] ≥ confidenceThreshold` 且 `confidence ≥ 0.5` → **按 jev 的选择执行**：`allow` 交给 omp 原生审批，`deny` 直接阻止，都不弹本插件的人工确认窗口。胜出概率阈值必须大于 `0.5`，以排除均分概率；独立的 confidence 下限允许恰好等于 `0.5`。
 - 否则视为“jev 说不确定”，交给 LLM 审核链，人工确认窗口等既有行为完全不变。提示词明确要求 jev 在无法区分两个选项时把两个概率留得接近，而不是强行二选一。
 
 jev 只产出 `allow` 与 `deny`，不产出 `ask`，因此也不产出 `recommendation`，`recommendationTimeoutMs` 的超时自动决策只在 LLM 路径生效。
 
-**阈值内的 deny 是终局的。** 被阻止的调用会把本地合成的理由作为工具错误返回给 agent，由它调整方案或向你说明，但本次调用不会再有“仅批准本次调用”的机会。因此阈值就是你对这一层误判的风险容忍度：调高 `confidenceThreshold` 会把更多调用交给 LLM 复核并保留人工窗口，调低则把更多决定权交给前置层。需要临时收回这层权限时用 `/auto-review jev off`。
+**可信 deny 是终局的。** 被阻止的调用会把本地合成的理由作为工具错误返回给 agent，由它调整方案或向你说明，但本次调用不会再有“仅批准本次调用”的机会。调高 `confidenceThreshold` 会把更多调用交给 LLM 路径及其正常确认策略，调低则把更多决定权交给前置层。需要临时收回这层权限时用 `/auto-review jev off`。
 
 因为 jev 不评估风险等级，前置审查路径不产出 `risk` 与 `authorization`，`parseVerdict` 中“高风险/critical 的 allow 降级为 ask”的保护只作用于 LLM 路径。
 
-实测结果参考：对界限清晰的调用（任务内的 `npm test`、越权的 `rm -rf ~/Documents`、效果未知的 `bash deploy.sh --prod`、把凭据文件 POST 到外部地址），`jev-1.13.0` 返回的概率分布是饱和的（胜出概率与 confidence 均为 `1`），判断方向也正确，单次调用约 0.3–0.9 秒、约 1000 input tokens。也就是说默认 `0.85` 的阈值在这类调用上不是瓶颈，降级到 LLM 只会发生在真正含糊的输入上；请按你自己的操作类型抽样验证后再决定阈值。
+概率与 confidence 是路由信号，不是准确性保证。请用选定的 judgment provider 对预期操作抽样验证后再决定阈值；插件不保证更低费用、更短延迟或正确裁决。
 
 ### 理由文本由本地合成
 
-jev 不返回文本，所以审计、审查日志和被阻止调用回传给 agent 的中文理由完全由插件按模板生成，例如：
+插件不使用原生答案中由模型生成的理由文本。审计、审查日志和被阻止调用回传给 agent 的中文理由完全由插件根据门控及实际回答模型在本地合成，例如：
 
 ```text
-前置审查（jev-1.13.0）判定可放行：胜出概率 0.95 ≥ 阈值 0.85（confidence 0.9）
+前置审查（typesafe/jev-1.13.0）判定可放行：胜出概率 0.95 ≥ 阈值 0.85（confidence 0.9）
 ```
 
-发给 jev 的问题与选项说明使用英文（官方文档指出英文准确率最好，CJK 支持较弱且更依赖 confidence 路由）；`state` 是与 LLM 审核完全相同的脱敏负载，作为 JSON 对象发送。
+固定的问题指令与选项 criteria 使用英文；`state` 是与 LLM 审核相同的脱敏负载，作为 JSON 对象传给原生 SDK。
 
 ### 失败与降级
 
-未配置、`enabled: false`、找不到密钥时，前置审查被静默跳过，行为与之前完全一致。配置了但调用失败时，降级到 LLM 审核链，失败分类仍写入 `attempts` 诊断和审计，便于发现密钥或额度问题：
+未配置、`enabled: false` 或宿主有效角色链中没有可用的原生候选时，不产生前置审查尝试或 `prefilter` 记录。已开启但无候选时，`/auto-review status` 和 `jev on` 会给出警告。候选可用性来自宿主缓存的可用性检查，不保证请求凭据一定能解析或被端点接受。已选候选失败时，链路继续尝试后续原生候选，最后交给 LLM；各次尝试保留固定失败分类：
 
-| 情况 | 分类 | 是否重试 |
+| 情况 | 分类 | 本候选是否进行插件重试 |
 | --- | --- | --- |
-| 401 / 403 | 认证失败 | 否 |
+| 尝试时无凭据，或最终返回 401 / 402 / 403 | 认证失败 | 否 |
 | 422 请求体被拒 | 响应格式无效 | 否 |
 | 429 限流 / 529 过载 | 限流 | 是 |
 | 其他非 2xx、网络异常 | 接口或网络异常 | 是 |
@@ -197,13 +201,15 @@ jev 不返回文本，所以审计、审查日志和被阻止调用回传给 age
 | 响应超过 64 KiB | 输出达到上限 | 否 |
 | 超过 `timeoutMs` | 超时 | 是（在预算内） |
 
+上表描述的是插件重试，而非单次 HTTP 请求。原生 SDK 可能在一次插件尝试中轮换凭据或重试传输请求，因此 `retryCount: 0` 不保证只有一次 HTTP 请求。这些请求与等待仍受该次尝试的取消信号和前置审查总预算约束。不可重试失败直接跳到下一个原生候选。
+
 重定向一律拒绝，避免密钥被转发到其他主机；错误信息只保留固定分类，不写入响应正文。
 
-只配 jev 而没有 `model` 时，插件仍可工作：阈值内由 jev 决定，阈值外记为 `preflightError: "prefilter_low_confidence"` 并转人工确认。
+启用 jev 而未配置 LLM `model` 时，可信的原生答案仍可决定调用。有效答案未通过任一门控时，记为 `preflightError: "prefilter_low_confidence"`；没有候选或候选全部失败时，记为 `model_not_configured`。两者均在可用时转人工确认，无交互界面则阻止；已完成的前置审查尝试会保留。
 
 ### 时间预算
 
-前置审查**共享** `reviewTimeoutMs`，不额外延长总时间，因此“审核 + 人工确认 ≤ 110 秒”的约束和既有配置都不受影响。配置校验要求 `timeoutMs × (retryCount + 1) + retryDelayMs × retryCount` 严格小于 `reviewTimeoutMs`，保证 LLM 链总能分到时间；默认组合为 10500ms < 20000ms。jev 未用完的时间会留给 LLM 链。`/auto-review status` 显示该最坏占用值。
+前置审查**共享** `reviewTimeoutMs`，不额外延长总时间，保留“审核 + 人工确认 ≤ 110 秒”的约束。其总上限为 `timeoutMs × (retryCount + 1) + retryDelayMs × retryCount`，配置校验要求它严格小于 `reviewTimeoutMs`；默认组合为 10500ms < 20000ms。所有原生候选共享这一个上限，不是每个模型各有一份。每个候选按后续候选数分配剩余时间，其认证、headers 解析、SDK 重试及插件重试均计入自身时间份额。前置审查未用完的时间留给 LLM 链；`/auto-review status` 显示配置的总上限。
 
 ### 审计与状态
 
@@ -212,7 +218,7 @@ jev 不返回文本，所以审计、审查日志和被阻止调用回传给 age
 ```json
 {
   "prefilter": {
-    "model": "jev-1.13.0",
+    "model": "typesafe/jev-1.13.0",
     "decision": "allow",
     "probability": 0.95,
     "confidence": 0.9,
@@ -224,7 +230,7 @@ jev 不返回文本，所以审计、审查日志和被阻止调用回传给 age
 }
 ```
 
-`status` 为 `decided`（采用了 jev 的结论）、`escalated`（有答案但低于阈值）或 `unavailable`（没有拿到答案）。`model` 记录响应回报的版本化 ID。jev 给出结论时，记录的 `model` 为 `jev:<版本化 ID>`（如 `jev:jev-1.13.0`），`attempts` 中的尝试名为 `jev:<配置的模型名>`；这样与 `provider/model` 形态的 LLM 不会混淆。密钥、端点和响应正文都不写入任何日志。
+`status` 为 `decided`（采用了前置审查结论）、`escalated`（有效答案未通过任一门控）或 `unavailable`（尝试过的候选全部失败）。`prefilter.model` 记录实际回答候选的 provider 与经过校验的后端模型 ID；后端 ID 缺失或无效时使用该候选的 ID，unavailable 记录则使用首个候选。jev 给出结论时，外层记录的 `model` 为 `jev:<provider/id>`（如 `jev:typesafe/jev-1.13.0`），`attempts[].model` 保留配置的候选标识（如 `jev:typesafe/jev-latest`）。没有原生候选时不生成 `prefilter` 字段。前置审查诊断不包含连接凭据、端点 URL 或原始响应正文。
 
 状态栏在 jev 自己给出结论时标注来源，例如 `审核通过（jev 前置） · bash: npm test`、`审核拒绝（jev 前置）`；置信不足转 LLM 时不加该标注，人工放行仍记为“人工放行”。
 
@@ -235,9 +241,11 @@ jev 不返回文本，所以审计、审查日志和被阻止调用回传给 age
 默认启用 `common` 只读预设；`bashAllowCommands` 是附加规则，不替换预设：
 
 ```json
-"bashBypassEnabled": true,
-"bashReadonlyPreset": "common",
-"bashAllowCommands": []
+{
+  "bashBypassEnabled": true,
+  "bashReadonlyPreset": "common",
+  "bashAllowCommands": []
+}
 ```
 
 | 总开关 | 预设 | 生效规则 |
@@ -323,7 +331,7 @@ sed -n '1,80p' src/example.ts
 
 正常继承扩展的子 agent 会独立审核其工具调用，审核记录按会话区分。插件通过宿主 `AgentRegistry` 的真实父子关系获取祖先会话中的用户指令，并将子任务分配文字标为 agent 注入，不能用它证明用户授权。父会话的用户指令变化后，尚未完成的子会话批准也会失效；无法核实关系且缺少用户上下文时转人工处理。无 TUI 的子 agent 被拒绝后，工具错误会返回原因，供主 agent 调整方案或向用户说明。
 
-**受限工具集子 agent 是已知例外。** omp 在 `restrictToolNames` 路径清空扩展列表，纯插件只能审核父级任务派发，无法逐条审核该子 agent 的内部操作。计划模式下的受限子任务也可能走此路径。不要把父级任务批准理解为内部命令都已审核。[上游实现](https://github.com/can1357/oh-my-pi/blob/v18.1.16/packages/coding-agent/src/task/executor.ts)
+**`18.10.3` 中，受限工具集本身不会移除继承的审核钩子。** 宿主关闭新的扩展发现与扩展工具接入，但会把父会话已准备好的扩展工厂重新绑定到受限子会话，包括计划模式子任务。SDK 调用方若创建受限会话而没有传入这些 prepared extensions，该会话就不会加载插件。因此覆盖取决于实际扩展继承，批准父级任务派发并不能证明子会话的内部操作已经审核。参见[会话加载分支](https://github.com/can1357/oh-my-pi/blob/v18.10.3/packages/coding-agent/src/sdk.ts)和[子会话构造](https://github.com/can1357/oh-my-pi/blob/v18.10.3/packages/coding-agent/src/task/executor.ts)。
 
 这是执行前审核层，不是 OS 沙箱：
 
@@ -331,21 +339,21 @@ sed -n '1,80p' src/example.ts
 - 扩展与 omp 同进程，不能防止其他恶意扩展、宿主代码或卸载本插件绕过审核。来源识别依赖宿主元数据；若 SDK 内联替换工具仍被宿主标为原生内置，插件无法区分。请使用可信扩展，并尽量把审核插件放在会修改工具输入的扩展之后；不支持后续扩展改写已经审核过的输入。
 - 普通文件编辑可能触发宿主的格式化/LSP 等内部行为；插件审核外层工具调用，不拦截全部系统调用。
 - 用户手动执行的终端命令不在第一版范围内。
-- 模型仍可能误判或受提示注入影响。来源标注和审核提示词用于降低风险，不构成形式化安全保证。启用 jev 前置审查后，阈值内的调用完全由 jev 决定——`allow` 直接放行、`deny` 直接阻止，都没有人工确认窗口——阈值即你对该层误判的风险容忍度：提高 `confidenceThreshold` 会把更多调用交给 LLM 复核并恢复人工窗口，降低它会把更多决定权交给前置层。需要严格隔离时应另外使用容器或 OS 沙箱。
+- 模型仍可能误判或受提示注入影响。来源标注和审核提示词用于降低风险，不构成形式化安全保证。前置审查答案同时通过两个门控时，不再弹插件确认窗口；可信 `allow` 仍不能越过 omp 原生审批。提高概率阈值会把更多调用交给正常 LLM 路径，降低则把更多决定权交给前置层。需要严格隔离时应另外使用容器或 OS 沙箱。
 
 ## 隐私与审计
 
 审核发送完整操作的脱敏副本、cwd、最近用户指令和预算内的相关历史。工具结果、assistant 文本和摘要标注为不可信数据；只有用户直接表达的意图可构成授权。历史可能被省略，但当前操作和最新用户指令不会被静默截断后交给模型批准。超过预算时转人工确认；完整参数超过 128 KiB、无法安全展示时直接阻止并要求拆分。
 
-**启用 jev 前置审查会新增一个出网目的地。** 脱敏后的操作、cwd 与最新用户指令会以 HTTPS 发送到 `jev.baseUrl`（默认 `api.typesafe.ai`），这是与 omp 配置的 provider 不同的第三方服务，使用你自己的 TypeSafe 密钥计费。不启用 `jev` 块时不会向该地址发送任何数据。TypeSafe 文档声明 jev 不使用客户请求训练模型，企业客户另有零数据保留选项；是否接受该目的地由你决定。密钥从 `apiKeyEnv` 指向的环境变量或 `apiKey` 读取，只出现在请求头中，不写入状态栏、审计、审查日志或错误信息，`/auto-review status` 只显示密钥来源。
+**启用 jev 前置审查会把审核负载发送到选定的 judgment 提供商。** 脱敏后的操作、cwd、最新用户指令及纳入负载的历史会发送给 omp `judge` 角色链解析出的原生候选，包括可能属于其他 provider 的备用候选。没有 `jev` 块、`enabled: false` 或没有可用原生候选时，不发送前置审查请求。启用前应核查所有已配置 judgment provider 的数据保留和训练条款，插件不强制执行这些条款。凭据与 provider/model headers 由 omp 解析，不存入 `auto-review.json`，也不纳入前置审查诊断。
 
 脱敏覆盖常见 token、认证头、密码赋值、嵌套凭据字段和私钥。它是启发式过滤，不能识别任意自定义或编码后的秘密；发送目的地由你选择的审核 provider 决定。人工窗口位于本地，会显示实际操作参数以便核对。
 
-审计文件位于 `getAgentDir()/auto-review/audit/YYYY-MM-DD.jsonl`，新目录权限为 `0700`，新文件为 `0600`。记录会话、调用 ID、参数字段名与字节数、SHA-256、审核模型（成功时为给出结论的模型，失败时为最后尝试的模型；jev 给出结论时为 `jev:<版本化 ID>` 并附带 `prefilter`；备用模型另记 `fallbackUsed: true`；命中免审规则时为 `null`，并记录 `bypassRule`）、各次尝试的 `attempts`、前置审查结果 `prefilter`、决定、脱敏原因、耗时及人工覆盖结果；ask 的推荐以脱敏后的 `recommendation` 字段保存，按推荐自动决策另记 `automaticRecommendation`；不写入原始命令、完整审核上下文或认证密钥。
+审计文件位于 `getAgentDir()/auto-review/audit/YYYY-MM-DD.jsonl`，新目录权限为 `0700`，新文件为 `0600`。记录会话、调用 ID、参数字段名与字节数、SHA-256、审核模型（成功时为给出结论的模型，失败时为最后尝试的模型；jev 给出结论时为 `jev:<provider/id>` 并附带 `prefilter`；LLM 备用模型另记 `fallbackUsed: true`；命中免审规则时为 `null`，并记录 `bypassRule`）、各次尝试的 `attempts`、前置审查结果 `prefilter`、决定、脱敏原因、耗时及人工覆盖结果；ask 的推荐以脱敏后的 `recommendation` 字段保存，按推荐自动决策另记 `automaticRecommendation`；不写入原始命令、完整审核上下文或认证密钥。
 
 `outcome` 表示本插件的审批结果，不代表工具已执行成功；后续原生审批或取消仍可能阻止执行。审计写入失败时不放行。日志按日期分文件，第一版不自动删除历史日志，可按需要自行归档。
 
-审核准备阶段失败仍记为 `decision: "error"`，但另记 `preflightError`：`model_not_configured`（模型未配置）、`missing_user_context`（缺少用户任务上下文）、`operation_too_large`（完整操作超出预算）、`user_instruction_too_large`（用户指令超出预算）或 `prefilter_low_confidence`（前置审查置信不足且未配置 LLM 审核模型）。除 `prefilter_low_confidence` 外，这些记录的 `model` 为 `null` 且没有 `attempts`，`reason` 为具体的固定原因；可据此与模型调用故障区分。`prefilter_low_confidence` 会保留 jev 的那次尝试及其 `prefilter` 记录，因此 `model` 为 `jev:<模型名>`。已配置模型或启用前置审查时，可选审查日志也记录这些字段和原因。
+审核准备阶段失败仍记为 `decision: "error"`，但另记 `preflightError`：`model_not_configured`（模型未配置）、`missing_user_context`（缺少用户任务上下文）、`operation_too_large`（完整操作超出预算）、`user_instruction_too_large`（用户指令超出预算）或 `prefilter_low_confidence`（有效前置答案未通过门控且未配置 LLM 审核模型）。没有开始模型尝试时，记录的 `model` 为 `null` 且没有 `attempts`；已完成的前置尝试及其 `prefilter` 记录会保留，包括 `model_not_configured` 情况。固定的 `reason` 可与 provider 调用失败区分。在这条失败路径上，外层 `model` 是最后尝试候选（`jev:<provider/id>`），不是实际裁决模型。已配置模型或启用前置审查时，可选审查日志也记录相同字段与原因。
 
 ### 可选命令审查日志
 
@@ -367,7 +375,7 @@ sed -n '1,80p' src/example.ts
 
 ## 开发与验证
 
-开发需要 Node.js ≥ 22.12；真实宿主测试还需要 `omp 18.1.16`、Python 3 和 POSIX PTY。已安装的 omp 自带运行时，使用插件本身不需要开发依赖。
+开发需要 Node.js ≥ 22.12；真实宿主测试还需要 `omp 18.10.3`、Python 3 和 POSIX PTY。已安装的 omp 自带运行时，使用插件本身不需要开发依赖。
 
 `test:omp` 默认使用 `node_modules` 中固定版本的 omp，它是 Bun 脚本，因此需要 PATH 中有 Bun ≥ 1.3.14；或设置 `OMP_BIN` 指向自带运行时的 omp 二进制，免去该依赖。
 
@@ -380,10 +388,12 @@ npm run test:omp
 
 单元测试覆盖风险分流、严格 JSON、上下文来源与脱敏、符号链接、配置与重试参数校验、审核总开关（默认值、类型校验、关闭时不动用策略、模型、界面或日志、命令切换）、审计、异常、超时、取消、单次授权、推荐校验与选项标记、窗口到期防护、超时自动决策、备用模型链与时间均分、同模型重试与退避、重试预算不足与取消、失败尝试诊断、审核准备失败（固定原因、无模型尝试、错误信息不外泄）、状态摘要和并发确认。Bash 免审另有独立覆盖：总开关/预设/附加规则配置矩阵、完整命令匹配、安全复合命令与管道、危险 shell 语法/路径/执行修饰参数拒绝、加固改写、免审审计与不调用模型，以及存在 Git 过滤器时回到模型审核。可选审查日志独立覆盖：路径校验与保存/重载、四类决定在人工确认前落盘、完整命令与嵌套凭据脱敏、文件权限、绝对路径追加，以及关闭、免审、未配置模型时不写入和写入失败阻止调用。
 
-jev 前置审查独立覆盖（`test/jev.test.ts`、`test/prefilter.test.ts`）：配置矩阵（端点协议与内嵌凭据、模型名形态、阈值 0.5 下限、密钥字段不回显、预算必须小于 `reviewTimeoutMs`、往返保留）、请求体与官方文档结构一致、`state` 已脱敏、答案严格校验（缺字段、概率越界或数量不对、`choice` 不是最高概率项、noul 答案）、阈值与 0.5 地板值的边界、理由由本地合成且拒绝为不可信门控生成结论；传输层用本地 `node:http` 服务器验证请求头与方法、401/403/422 不重试、429/529 退避重试、超时中止、取消传播、拒绝重定向（目标端点零请求）、64 KiB 上限、密钥优先级与密钥不入诊断；链路层验证可信 allow 时 LLM 零调用、可信 deny 不弹确认窗口直接阻止、置信不足的 deny 仍保留人工窗口、置信不足由 LLM 给出结论、调用失败降级且两层诊断共存、仅配 jev 时的决定与 `prefilter_low_confidence`、关闭或未配置时行为不变、预算共享与剩余时间移交，以及审计/审查日志中的 `prefilter` 字段与不含密钥。
+jev 单元与链路测试（`test/jev.test.ts`、`test/prefilter.test.ts`）覆盖策略校验与已移除字段拒绝、负载脱敏、答案严格校验、概率与 confidence 的独立边界、本地理由合成、原生候选顺序及模型标识、重试、取消与预算共享。还覆盖可信 allow/deny 不调用 LLM 且不弹确认窗口、置信不足或候选失败时转 LLM、仅配 jev 的准备失败、关闭/空候选路径，以及审计和审查日志诊断保留。这些测试注入原生候选，不调用付费 judgment 服务。
 
-`test:omp` 会在临时目录复制一个**不含 node_modules** 的插件包，用真实 omp 和本地模拟 provider 验证批准、拒绝、无效响应、未配置模型、审核准备失败（操作或用户指令超出预算时不调用模型、审计与审查日志记录固定原因、工具错误回传该原因）、插件总开关关闭（放行原始调用且不写审计与审查日志）、原生审批、普通子 agent、`write` 经 `xd://` 转发执行的审核、只读 Bash 免审规则的改写与审计（`model: null` 加 `bypassRule`）、免审总开关关闭、安全复合命令及文本管道免审、危险复合命令回退模型审核、配置了 Git 过滤器时回到审核、原生 `deny` 仍阻止免审命令、备用模型在主模型缺失/超时/响应无效时接管、有效裁决不触发切换、同模型重试后拿到结论或耗尽后切换备用模型、整条链失败转人工确认并记录各次尝试诊断，以及真实 TUI 的批准/显式拒绝/取消和按模型推荐自动放行/拒绝。jev 前置审查另有一组场景：本地模拟的 jev 端点通过 `jev.baseUrl` 接入，验证可信 allow 直接放行且不调用模拟 LLM、可信 deny 在真实 TUI 中不出现确认窗口并直接阻止、置信不足时由 LLM 接管、401 时降级并在审计中保留失败分类、仅配 jev 且置信不足时记录 `prefilter_low_confidence` 并转人工确认，以及 `enabled: false` 时行为与不配置一致。模型由测试扩展在内存中模拟，jev 端点由本地 HTTP 服务器模拟，都不消耗付费额度；不修改用户的 omp 配置。受限子 agent 的不继承边界另有基于已锁定 SDK 源码的回归检查。
+`test:omp` 会在临时目录复制一个**不含 node_modules** 的插件包，用内存模拟 provider 启动真实 omp。通用场景验证审核批准/拒绝与失败、准备失败、总开关、原生审批、普通子 agent、嵌套 `xd://` 执行、Bash 免审与加固、LLM 备用链/重试诊断，以及真实 TUI 的批准、拒绝、取消与自动推荐决策。
+
+原生 judgment 场景通过 omp 的 `judge` 角色选择本地 HTTP 端点，验证可信 allow/deny（包括 TUI 中不弹确认窗口的 deny）、置信不足移交、认证失败与 402 额度错误、仅配 jev 的准备失败、关闭/仅 chat 候选/宿主无凭据路径、拒绝重定向、按 64 KiB 上限拒绝超大响应、畸形响应、凭据和 headers 路由，以及审计/审查日志脱敏。模拟模型和本地端点不消耗付费额度，测试使用隔离的 omp 配置，不修改用户配置。
 
 可设置 `OMP_BIN=/path/to/omp` 指定二进制，`OMP_SMOKE_CASES=child` 单独运行场景（`fallback-*` 为备用模型场景，`retry-*` 为同模型重试场景，`bypass-*` 为 Bash 免审场景，`preflight-*` 为审核准备失败场景，`jev-*` 为前置审查场景，`disabled` 为插件总开关关闭场景），`KEEP_SMOKE_ARTIFACTS=1` 保留测试产物；失败时自动保留产物路径。
 
-接口参考：[扩展接口](https://github.com/can1357/oh-my-pi/blob/v18.1.16/docs/extensions.md)、[扩展加载规则](https://github.com/can1357/oh-my-pi/blob/v18.1.16/docs/extension-loading.md)。
+接口参考：[扩展接口](https://github.com/can1357/oh-my-pi/blob/v18.10.3/docs/extensions.md)、[扩展加载规则](https://github.com/can1357/oh-my-pi/blob/v18.10.3/docs/extension-loading.md)。

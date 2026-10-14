@@ -2,3 +2,7 @@
 # Keeps the existing approval policy. This overlay does not change tools.approvalMode.
 extensionHandlers:
   toolCallTimeoutMs: 120000
+modelRoles:
+  # Example native judgment model; choose an available provider/model and configure its auth in omp.
+  # Only native judgment APIs are used. The plugin's jev block must be enabled separately.
+  judge: typesafe/jev-latest

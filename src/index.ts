@@ -3,12 +3,12 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { appendAudit } from "./audit.ts";
 import { appendReviewLog } from "./review-log.ts";
-import { ConfigStore, defaults, jevApiKey, type ReviewConfig } from "./config.ts";
+import { ConfigStore, defaults, type ReviewConfig } from "./config.ts";
 import { ReviewEngine } from "./engine.ts";
 import type { ToolCall } from "./policy.ts";
 import { collectHistory } from "./context.ts";
 import { safeText } from "./privacy.ts";
-import { reviewWithLlm } from "./transport.ts";
+import { reviewWithLlm, selectJevCandidates } from "./transport.ts";
 import { prefilterChain } from "./chain.ts";
 import { reviewStatus } from "./status.ts";
 import { registerReviewCommand } from "./commands.ts";
@@ -25,7 +25,7 @@ export default function autoReview(pi: ExtensionAPI): void {
     sources: () => pi.getAllTools(),
     history: ctx => collectHistory(ctx, pi.pi.AgentRegistry.global()),
     protectedRoots: [agentDir, pluginRoot],
-    review: prefilterChain(reviewWithLlm),
+    review: prefilterChain(reviewWithLlm, selectJevCandidates),
     audit: record => appendAudit(agentDir, record),
     reviewLog: (path, record) => appendReviewLog(agentDir, path, record),
     onResult: (operation, result, ctx) => {
@@ -45,10 +45,10 @@ export default function autoReview(pi: ExtensionAPI): void {
         return Boolean(ctx.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1)));
       });
     }
-    // The prefilter is a reviewer in its own right: with a key it can decide inside the threshold.
-    const prefilter = config.jev && config.jev.enabled !== false && jevApiKey(config.jev).key ? config.jev : undefined;
-    if (ready) return `已启用：${config.model}${prefilter ? ` · 前置：${prefilter.model}` : ""}`;
-    if (prefilter) return `已启用：前置审查 ${prefilter.model}${config.model ? "；LLM 审核模型不可用，阈值外需人工确认" : "；未配置 LLM 审核模型，阈值外需人工确认"}`;
+    // The status reflects host-native candidates, not a successful credential or network check.
+    const prefilter = config.jev && config.jev.enabled !== false ? selectJevCandidates(ctx)[0]?.model : undefined;
+    if (ready) return `已启用：${config.model}${prefilter ? ` · 前置：${prefilter}` : ""}`;
+    if (prefilter) return `已启用：前置审查 ${prefilter}${config.model ? "；LLM 审核模型不可用，阈值外需人工确认" : "；未配置 LLM 审核模型，阈值外需人工确认"}`;
     return "未就绪：请配置可用的审核模型；受审操作需人工确认";
   };
   const statusLine = (ctx: ExtensionContext): string => safeText(
@@ -80,6 +80,7 @@ export default function autoReview(pi: ExtensionAPI): void {
   pi.on("tool_call", (event, ctx) => engine.handle(event as ToolCall, ctx));
   registerReviewCommand(pi, {
     config: () => config, configError: () => Boolean(configError), status, load,
+    jevModels: ctx => selectJevCandidates(ctx).map(candidate => candidate.model),
     cancel: () => engine.cancel(), store,
   });
 }

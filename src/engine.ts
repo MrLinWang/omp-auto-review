@@ -195,9 +195,9 @@ export class ReviewEngine {
         }), controller.signal);
       }
 
-      // A verdict the prefilter produced inside the threshold is final by configuration:
-      // above the threshold jev's own choice is executed, so its deny blocks without asking.
-      // The threshold is where that tolerance is set; below it the LLM chain decides instead.
+      // A prefilter answer that passed both probability and confidence gates is final:
+      // its deny blocks without a confirmation window. Escalated answers leave the LLM
+      // verdict or preparation failure to the normal confirmation path.
       const prefilterDecided = prefilter?.trusted === true;
       if (!controller.signal.aborted && decision === "allow") outcome = "allowed";
       else if (!controller.signal.aborted && !prefilterDecided && ctx.hasUI && ctx.mode === "tui") {

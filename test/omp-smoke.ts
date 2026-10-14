@@ -17,6 +17,13 @@ const jevReplies: Record<string, { status: number; choice?: "allow" | "deny"; al
   "jev-only": { status: 200, choice: "allow", allow: 0.62, deny: 0.38, confidence: 0.28 },
   "jev-unavailable": { status: 401 },
   "jev-disabled": { status: 200, choice: "allow", allow: 0.99, deny: 0.01, confidence: 0.99 },
+  "jev-redirect": { status: 302 },
+  "jev-oversize": { status: 200 },
+  "jev-chat-role": { status: 200 },
+  "jev-no-key": { status: 200 },
+  "jev-quota": { status: 402 },
+  "jev-malformed": { status: 200 },
+  "jev-invalid-json": { status: 200 },
 };
 
 /** Local stand-in for api.typesafe.ai; records each call in the shared trace. */
@@ -26,18 +33,26 @@ async function startJevEndpoint(scenario: string, trace: string) {
     const chunks: Buffer[] = [];
     request.on("data", chunk => chunks.push(chunk as Buffer));
     request.on("end", () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
       const question = Object.keys(body.questions ?? {})[0];
       appendFileSync(trace, `${JSON.stringify({
         role: "prefilter", method: request.method, path: request.url,
         // Record only whether the expected credential arrived, never the value.
         auth: request.headers.authorization === "Bearer smoke-test-key",
+        headers: request.headers["x-smoke-provider"] === "native-route" && request.headers["x-smoke-model"] === "judge-only",
         model: body.model, question, criteria: Object.keys(body.questions?.[question]?.criteria ?? {}).sort(),
         command: body.state?.operation?.input?.command, source: body.state?.latestUserInstruction?.source,
       })}\n`);
+      if (scenario === "jev-redirect") {
+        response.writeHead(302, { location: `http://127.0.0.1:${(server.address() as AddressInfo).port}/redirected-smoke-credential-target` });
+        response.end();
+        return;
+      }
       response.writeHead(reply.status, { "content-type": "application/json" });
-      response.end(reply.status === 200
-        ? JSON.stringify({
+      response.end(scenario === "jev-oversize" ? "x".repeat(64 * 1024 + 1)
+        : scenario === "jev-invalid-json" ? "{"
+        : scenario === "jev-malformed" ? JSON.stringify({ model: "jev-1.13.0", answers: {} })
+        : reply.status === 200 ? JSON.stringify({
           model: "jev-1.13.0",
           answers: { tool_call_decision: { type: "choice", choice: reply.choice, probabilities: { allow: reply.allow, deny: reply.deny }, confidence: reply.confidence } },
           usage: { input_tokens: 120, output_tokens: 8 },
@@ -62,7 +77,7 @@ try {
   await mkdir(runtimePackage);
   await cp(join(repo, "src"), join(runtimePackage, "src"), { recursive: true });
   await cp(join(repo, "package.json"), join(runtimePackage, "package.json"));
-  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "preflight-context-budget", "preflight-operation-budget", "disabled", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail", "retry-invalid", "retry-timeout", "retry-exhausted", "bypass-pwd", "bypass-git", "bypass-git-filter", "bypass-disabled", "bypass-compound", "bypass-safe-compound", "bypass-text", "bypass-extras", "bypass-off-empty", "bypass-native-deny", "jev-allow", "jev-deny", "jev-escalate", "jev-unavailable", "jev-only", "jev-disabled"])) {
+  for (const scenario of (process.env.OMP_SMOKE_CASES?.split(",") ?? ["allow", "deny", "invalid", "missing", "preflight-context-budget", "preflight-operation-budget", "disabled", "native-deny", "native-prompt", "child", "xd", "tui-approve", "tui-reject", "tui-cancel", "tui-auto-approve", "tui-auto-deny", "fallback-invalid", "fallback-timeout", "fallback-missing", "fallback-deny", "fallback-ask", "fallback-all-fail", "retry-invalid", "retry-timeout", "retry-exhausted", "bypass-pwd", "bypass-git", "bypass-git-filter", "bypass-disabled", "bypass-compound", "bypass-safe-compound", "bypass-text", "bypass-extras", "bypass-off-empty", "bypass-native-deny", ...Object.keys(jevReplies)])) {
     const cwd = join(root, scenario, "work"), agentDir = join(root, scenario, "agent");
     await mkdir(cwd, { recursive: true });
     if (scenario.startsWith("bypass-")) {
@@ -74,7 +89,7 @@ try {
     await mkdir(join(agentDir, "agents"), { recursive: true });
     const trace = join(root, scenario, "trace.jsonl");
     await writeFile(trace, "");
-    // The prefilter endpoint must exist before the config that points at it is written.
+    // Native connection and credentials belong to the isolated OMP registry, never auto-review.json.
     const jev = scenario.startsWith("jev-") ? await startJevEndpoint(scenario, trace) : undefined;
     await writeFile(join(agentDir, "config.yml"), `
 startup:
@@ -88,6 +103,10 @@ extensionHandlers:
   toolCallTimeoutMs: 120000
 modelRoles:
   task: review-test/child
+  ${jev ? `judge: ${scenario === "jev-chat-role" ? "review-test/reviewer" : scenario === "jev-no-key" ? "typesafe/jev-latest" : "review-test/jev-latest"}` : ""}
+retry:
+  fallbackChains:
+    judge: []
 async:
   enabled: false
 task:
@@ -103,10 +122,6 @@ task:
       ...(jev ? {
         reviewLogPath: "reviews.jsonl",
         jev: {
-          baseUrl: `http://127.0.0.1:${jev.port}/v1/systemone`,
-          model: "jev-latest",
-          // No TYPESAFE_API_KEY in the whitelisted environment, so the config key is used.
-          apiKey: "smoke-test-key",
           confidenceThreshold: 0.85,
           timeoutMs: 2000,
           retryCount: 0,
@@ -139,6 +154,7 @@ task:
     const env: NodeJS.ProcessEnv = {
       PATH: process.env.PATH, HOME: process.env.HOME, TERM: isTui ? "xterm-256color" : "dumb", LANG: "C.UTF-8",
       PI_CODING_AGENT_DIR: agentDir, OMP_REVIEW_TEST_CASE: scenario, OMP_REVIEW_TEST_TRACE: trace,
+      OMP_REVIEW_JEV_BASE_URL: jev ? `http://127.0.0.1:${jev.port}` : undefined,
       PI_CONFIG_DIR: relative(homedir(), join(root, scenario, "omp-state")),
       PI_NO_PTY: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
     };
@@ -155,7 +171,7 @@ task:
     assert.equal(result.code, 0, `${scenario}: omp failed\n${result.output.slice(-6000)}`);
     assert.ok(result.output.includes("SMOKE_DONE"), `${scenario}: main agent did not finish\n${result.output.slice(-4000)}`);
     const marker = await access(join(cwd, "marker.txt")).then(() => true, () => false);
-    assert.equal(marker, ["allow", "disabled", "tui-approve", "tui-auto-approve", "fallback-invalid", "fallback-timeout", "fallback-missing", "retry-invalid", "retry-timeout", "retry-exhausted", "jev-allow", "jev-escalate", "jev-unavailable", "jev-disabled"].includes(scenario), `${scenario}: unexpected command execution`);
+    assert.equal(marker, ["allow", "disabled", "tui-approve", "tui-auto-approve", "fallback-invalid", "fallback-timeout", "fallback-missing", "retry-invalid", "retry-timeout", "retry-exhausted", "jev-allow", "jev-escalate", "jev-unavailable", "jev-disabled", "jev-redirect", "jev-oversize", "jev-chat-role", "jev-no-key", "jev-quota", "jev-malformed", "jev-invalid-json"].includes(scenario), `${scenario}: unexpected command execution`);
     const events = (await readFile(trace, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
     const auditDir = join(agentDir, "auto-review", "audit");
     const auditFiles = await readdir(auditDir).catch(() => []);
@@ -242,48 +258,56 @@ task:
       const calls = events.filter(event => event.role === "prefilter");
       const record = audit.trim().split("\n").map(line => JSON.parse(line)).find(record => record.toolName === "bash");
       const llmUsed = events.some(event => event.role === "review" && event.model === "reviewer");
-      if (scenario === "jev-disabled") {
-        assert.equal(calls.length, 0, "a disabled prefilter was contacted");
-        assert.equal(record.prefilter, undefined, "a disabled prefilter produced a record");
-        assert.ok(llmUsed, "a disabled prefilter must leave the LLM chain in charge");
+      if (["jev-disabled", "jev-chat-role", "jev-no-key"].includes(scenario)) {
+        assert.equal(calls.length, 0, `${scenario}: prefilter should not be contacted`);
+        assert.equal(record.prefilter, undefined, `${scenario}: an unattempted prefilter produced a record`);
+        assert.ok(llmUsed, `${scenario}: the LLM chain should decide`);
+        assert.equal(record.model, "review-test/reviewer");
+        assert.deepEqual(record.attempts.map((attempt: { model: string; status: string }) => [attempt.model, attempt.status]), [["review-test/reviewer", "success"]]);
       } else {
-        assert.equal(calls.length, 1, `prefilter call count ${calls.length}`);
-        assert.equal(calls[0].method, "POST");
-        assert.equal(calls[0].path, "/v1/systemone");
-        assert.equal(calls[0].auth, true, "prefilter call lacked the bearer credential");
-        assert.equal(calls[0].model, "jev-latest");
-        assert.equal(calls[0].question, "tool_call_decision");
-        assert.deepEqual(calls[0].criteria, ["allow", "deny"]);
-        // The prefilter judged the real operation and a real user instruction.
-        assert.ok(String(calls[0].command).includes("marker.txt"), "prefilter did not receive the operation");
-        assert.equal(calls[0].source, "user_message");
-        assert.ok(!audit.includes("smoke-test-key"), "audit leaked the prefilter credential");
-        assert.ok(!audit.includes("127.0.0.1"), "audit leaked the prefilter endpoint");
+        if (["jev-redirect", "jev-oversize"].includes(scenario)) {
+          // SDK transport retries remain inside one bounded plugin attempt.
+          assert.ok(calls.length >= 1 && calls.length <= 3, `unbounded SDK retries: ${calls.length}`);
+        } else assert.equal(calls.length, 1, `prefilter call count ${calls.length}`);
+        for (const call of calls) {
+          assert.equal(call.method, "POST");
+          assert.equal(call.path, "/v1/systemone", "a redirect target was contacted");
+          assert.equal(call.auth, true, "OMP did not resolve the native bearer credential");
+          assert.equal(call.headers, true, "OMP did not resolve provider and model headers");
+          assert.equal(call.model, "jev-latest");
+          assert.equal(call.question, "tool_call_decision");
+          assert.deepEqual(call.criteria, ["allow", "deny"]);
+          assert.ok(String(call.command).includes("marker.txt"), "prefilter did not receive the operation");
+          assert.equal(call.source, "user_message");
+        }
       }
       if (["jev-allow", "jev-deny"].includes(scenario)) {
         assert.ok(!llmUsed, "a trusted prefilter verdict still called the LLM chain");
-        assert.equal(record.model, "jev:jev-1.13.0");
+        assert.equal(record.model, "jev:review-test/jev-1.13.0");
         assert.equal(record.prefilter.status, "decided");
         assert.equal(record.prefilter.trusted, true);
         assert.equal(record.decision, scenario === "jev-allow" ? "allow" : "deny");
         assert.equal(record.outcome, scenario === "jev-allow" ? "allowed" : "blocked");
-        assert.deepEqual(record.attempts.map((attempt: { model: string; status: string }) => [attempt.model, attempt.status]), [["jev:jev-latest", "success"]]);
+        assert.deepEqual(record.attempts.map((attempt: { model: string; status: string }) => [attempt.model, attempt.status]), [["jev:review-test/jev-latest", "success"]]);
       }
       if (scenario === "jev-allow") assert.equal(record.prefilter.probability, 0.96);
-      // Inside the threshold jev's choice is executed as-is: a deny blocks with no human window,
-      // which the TUI driver verifies by failing if a dialog ever appears.
+      // A trusted deny blocks with no human window; the TUI driver fails if a dialog appears.
       if (scenario === "jev-deny") {
         assert.equal(record.humanOverride, false);
         assert.equal(record.automaticRecommendation, undefined);
       }
-      if (["jev-escalate", "jev-unavailable"].includes(scenario)) {
+      const fallbackStatus: Record<string, string> = {
+        "jev-escalate": "success", "jev-unavailable": "auth_error", "jev-quota": "auth_error",
+        "jev-redirect": "call_error", "jev-oversize": "output_limit", "jev-malformed": "invalid_response", "jev-invalid-json": "invalid_response",
+      };
+      if (Object.hasOwn(fallbackStatus, scenario)) {
         assert.ok(llmUsed, `${scenario} did not fall through to the LLM chain`);
         assert.equal(record.model, "review-test/reviewer");
         assert.equal(record.decision, "allow");
         assert.equal(record.prefilter.trusted, false);
         assert.equal(record.prefilter.status, scenario === "jev-escalate" ? "escalated" : "unavailable");
         assert.deepEqual(record.attempts.map((attempt: { model: string; status: string }) => [attempt.model, attempt.status]), [
-          ["jev:jev-latest", scenario === "jev-escalate" ? "success" : "auth_error"], ["review-test/reviewer", "success"],
+          ["jev:review-test/jev-latest", fallbackStatus[scenario]], ["review-test/reviewer", "success"],
         ]);
       }
       if (scenario === "jev-escalate") assert.equal(record.prefilter.confidence, 0.3);
@@ -292,16 +316,20 @@ task:
         assert.ok(!llmUsed, "a jev-only setup called an LLM reviewer");
         assert.equal(record.decision, "error");
         assert.equal(record.preflightError, "prefilter_low_confidence");
-        assert.equal(record.model, "jev:jev-latest");
+        assert.equal(record.model, "jev:review-test/jev-latest");
         assert.equal(record.prefilter.status, "escalated");
         assert.equal(record.attempts.length, 1);
         assert.ok(result.output.includes(record.reason), "tool error lost the prefilter reason");
       }
-      if (scenario !== "jev-disabled") {
-        const logged = JSON.parse((await readFile(join(agentDir, "reviews.jsonl"), "utf8")).trim());
-        assert.equal(logged.prefilter.status, record.prefilter.status);
-        assert.equal(logged.decision, record.decision);
-        assert.ok(String(logged.operation.input.command).includes("marker.txt"));
+      const reviewLog = await readFile(join(agentDir, "reviews.jsonl"), "utf8");
+      const logged = JSON.parse(reviewLog.trim());
+      assert.equal(logged.prefilter?.status, record.prefilter?.status);
+      assert.equal(logged.decision, record.decision);
+      assert.ok(String(logged.operation.input.command).includes("marker.txt"));
+      for (const text of [audit, reviewLog]) {
+        assert.ok(!text.includes("smoke-test-key"), "diagnostics leaked the native credential");
+        assert.ok(!text.includes("127.0.0.1"), "diagnostics leaked the native endpoint");
+        assert.ok(!text.includes("redirected-smoke-credential-target"), "diagnostics leaked the redirect location");
       }
     }
     console.log(`PASS ${scenario}`);

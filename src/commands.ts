@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { ConfigStore, jevApiKey, jevBudgetMs, jevDefaults, type JevConfig, type ReviewConfig } from "./config.ts";
+import { ConfigStore, jevBudgetMs, jevDefaults, type ReviewConfig } from "./config.ts";
 import { safeText } from "./privacy.ts";
 
 interface CommandState {
@@ -10,21 +10,24 @@ interface CommandState {
   load(ctx: ExtensionContext): Promise<void>;
   cancel(): void;
   store: ConfigStore;
+  /** Full provider/model ids for display; listing does not resolve keys or command-backed headers. */
+  jevModels(ctx: ExtensionContext): readonly string[];
 }
 
-/** Names the key source without ever revealing the key itself. */
-function keyLabel(jev: JevConfig): string {
-  const { source } = jevApiKey(jev);
-  return source === "env" ? `环境变量 ${jev.apiKeyEnv}` : source === "config" ? "配置文件" : "未配置";
-}
+/** Hint shown when the prefilter is enabled but the host has no usable native judge candidate. */
+const JEV_NO_CANDIDATE_HINT = "未找到可用的 OMP judge 决策模型，前置审查会被跳过；请在 OMP 中配置 modelRoles.judge 及对应模型的鉴权";
 
-function jevLines(config: ReviewConfig, configError: boolean): string {
+function jevLines(config: ReviewConfig, configError: boolean, models: readonly string[]): string {
   const jev = config.jev;
   if (!jev) return "前置审查（jev）：未配置";
-  return `前置审查（jev）：${!configError && jev.enabled !== false ? "开启" : "关闭"}；模型：${jev.model}；可信阈值：${jev.confidenceThreshold}
-前置审查密钥：${keyLabel(jev)}
-前置审查端点：${jev.baseUrl}
-前置审查超时：${jev.timeoutMs}ms；额外重试：${jev.retryCount}次；重试间隔：${jev.retryDelayMs}ms（最坏占用审核总超时 ${jevBudgetMs(jev)}ms）`;
+  const enabled = !configError && jev.enabled !== false;
+  const lines = [
+    `前置审查（jev）：${enabled ? "开启" : "关闭"}；可信阈值：${jev.confidenceThreshold}`,
+    `前置审查模型（OMP judge 原生候选）：${models.length ? models.join("；") : "无"}`,
+    `前置审查超时：${jev.timeoutMs}ms；额外重试：${jev.retryCount}次；重试间隔：${jev.retryDelayMs}ms（最坏占用审核总超时 ${jevBudgetMs(jev)}ms）`,
+  ];
+  if (enabled && models.length === 0) lines.push(JEV_NO_CANDIDATE_HINT);
+  return lines.join("\n");
 }
 
 /** Register user commands independently of the model transport. */
@@ -36,7 +39,11 @@ export function registerReviewCommand(pi: Pick<ExtensionAPI, "registerCommand">,
       const configError = state.configError();
       const parts = args.trim().split(/\s+/);
       if (!args.trim() || (parts[0] === "status" && parts.length === 1)) {
-        ctx.ui.notify(safeText(`${state.status(ctx)}\n备用模型：${config.fallbackModels.join(" → ") || "未配置"}\n${jevLines(config, configError)}\nBash 免审总开关：${!configError && config.bashBypassEnabled !== false ? "开启" : "关闭"}\n只读预设：${config.bashReadonlyPreset ?? "common"}\n附加免审规则：${config.bashAllowCommands?.join("；") || "无附加规则"}\n审查日志：${config.reviewLogPath ? resolve(state.store.agentDir, config.reviewLogPath) : "已关闭"}\n配置：${state.store.path}\n审核总超时：${config.reviewTimeoutMs}ms；单次调用上限：${config.modelTimeoutMs ?? 10_000}ms\n每个模型额外重试：${config.retryCount ?? 1}次；重试间隔：${config.retryDelayMs ?? 500}ms\n确认超时：${config.confirmationTimeoutMs}ms；自动决策等待：${config.recommendationTimeoutMs ?? 15_000}ms（0 为关闭）\n受限子 agent 不继承插件；原生审批仍生效。`), "info");
+        const models = state.jevModels(ctx);
+        const jev = config.jev;
+        // An enabled prefilter without a usable host candidate silently does nothing; warn instead.
+        const jevIdle = !configError && jev !== undefined && jev.enabled !== false && models.length === 0;
+        ctx.ui.notify(safeText(`${state.status(ctx)}\n备用模型：${config.fallbackModels.join(" → ") || "未配置"}\n${jevLines(config, configError, models)}\nBash 免审总开关：${!configError && config.bashBypassEnabled !== false ? "开启" : "关闭"}\n只读预设：${config.bashReadonlyPreset ?? "common"}\n附加免审规则：${config.bashAllowCommands?.join("；") || "无附加规则"}\n审查日志：${config.reviewLogPath ? resolve(state.store.agentDir, config.reviewLogPath) : "已关闭"}\n配置：${state.store.path}\n审核总超时：${config.reviewTimeoutMs}ms；单次调用上限：${config.modelTimeoutMs ?? 10_000}ms\n每个模型额外重试：${config.retryCount ?? 1}次；重试间隔：${config.retryDelayMs ?? 500}ms\n确认超时：${config.confirmationTimeoutMs}ms；自动决策等待：${config.recommendationTimeoutMs ?? 15_000}ms（0 为关闭）\n子 agent 覆盖取决于扩展继承；原生审批仍生效。`), jevIdle ? "warning" : "info");
       } else if (parts[0] === "reload" && parts.length === 1) await state.load(ctx);
       else if (["on", "off"].includes(parts[0]) && parts.length === 1) {
         // Like the Bash switch: never overwrite a malformed configuration with fallback defaults.
@@ -62,14 +69,15 @@ export function registerReviewCommand(pi: Pick<ExtensionAPI, "registerCommand">,
         // Same rule as the Bash switch: a malformed file is never overwritten with defaults.
         if (configError) { ctx.ui.notify("配置无效，请修复后 reload 再切换前置审查开关", "error"); return; }
         try {
-          // Turning it on without a block writes the documented defaults, so only the key is left to provide.
+          // Turning it on without a block writes the documented defaults, ready for the host's judge role.
           await state.store.save({ ...config, jev: { ...(config.jev ?? jevDefaults), enabled: parts[1] === "on" } });
           await state.load(ctx);
           if (state.configError()) { ctx.ui.notify("开关已保存，但配置重载失败；前置审查已禁用", "error"); return; }
           const jev = state.config().jev;
           if (!jev || jev.enabled === false) { ctx.ui.notify("前置审查（jev）：关闭；受审调用直接交给 LLM 审核链", "info"); return; }
-          const missing = jevApiKey(jev).source === "none";
-          ctx.ui.notify(`前置审查（jev）：开启；模型：${jev.model}；可信阈值：${jev.confidenceThreshold}；密钥：${keyLabel(jev)}${missing ? "\n未找到 API 密钥，前置审查会被跳过；请设置环境变量或 jev.apiKey" : ""}`, missing ? "warning" : "info");
+          const models = state.jevModels(ctx);
+          const missing = models.length === 0;
+          ctx.ui.notify(`前置审查（jev）：开启；可信阈值：${jev.confidenceThreshold}；OMP judge 候选：${models.join("；") || "无"}${missing ? `\n${JEV_NO_CANDIDATE_HINT}` : ""}`, missing ? "warning" : "info");
         } catch { ctx.ui.notify("无法保存用户级审核配置，前置审查开关未切换", "error"); }
       }
       else if (parts[0] === "model" && parts.length === 2) {

@@ -18,7 +18,7 @@ child = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave,
 os.close(slave)
 output = bytearray()
 scenario = os.environ["OMP_REVIEW_TEST_CASE"]
-# A prefilter verdict inside the threshold is final, so no dialog is offered to answer.
+# A trusted prefilter verdict is final, so no dialog is offered to answer.
 expects_dialog = scenario != "jev-deny"
 answered = not expects_dialog
 exited = False

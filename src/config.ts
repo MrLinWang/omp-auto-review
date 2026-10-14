@@ -4,20 +4,13 @@ import { randomUUID } from "node:crypto";
 import { normalizeBashCommand, readonlyBashCommand } from "./bash-rules.ts";
 
 /**
- * TypeSafe jev prefilter: an independent HTTP API, deliberately separate from the
- * omp model registry that serves `model`/`fallbackModels`. A missing block keeps the
- * prefilter off and leaves the LLM chain exactly as it was.
+ * jev prefilter policy. The decision model itself is the host's: candidates come from OMP
+ * `modelRoles.judge` with the host's own credentials, so this block carries only the gating
+ * policy. A missing block keeps the prefilter off and leaves the LLM chain exactly as it was.
  */
 export interface JevConfig {
   /** Omitted means enabled; the block's presence is what opts in. */
   enabled?: boolean;
-  baseUrl: string;
-  /** A jev model name or alias such as `jev-latest`; never a `provider/model` spec. */
-  model: string;
-  /** Environment variable holding the API key; it wins over the inline `apiKey`. */
-  apiKeyEnv: string;
-  /** Inline key fallback for hosts without environment variables; never echoed. */
-  apiKey?: string;
   /** Winning-option probability required to accept jev's verdict without the LLM chain. */
   confidenceThreshold: number;
   timeoutMs: number;
@@ -68,61 +61,25 @@ export const defaults: Readonly<ReviewConfig> = Object.freeze({
 
 export const jevDefaults: Readonly<JevConfig> = Object.freeze({
   enabled: true,
-  baseUrl: "https://api.typesafe.ai/v1/systemone",
-  model: "jev-latest",
-  apiKeyEnv: "TYPESAFE_API_KEY",
   confidenceThreshold: 0.85,
   timeoutMs: 5_000,
   retryCount: 1,
   retryDelayMs: 500,
 });
 
-/** Loopback hosts are the only reason to accept plain http: local mock servers in tests. */
-const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 export function parseJevConfig(value: unknown): JevConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("jev 必须是 JSON 对象");
   const obj = value as Record<string, unknown>;
-  const known = new Set([...Object.keys(jevDefaults), "apiKey"]);
+  // Removed connection/credential fields fail closed here instead of being silently ignored.
+  const known = new Set(Object.keys(jevDefaults));
   for (const key of Object.keys(obj)) if (!known.has(key)) throw new Error(`未知 jev 配置字段：${key}`);
   const result: JevConfig = { ...jevDefaults };
   if (obj.enabled !== undefined) {
     if (typeof obj.enabled !== "boolean") throw new Error("jev.enabled 必须为布尔值");
     result.enabled = obj.enabled;
   }
-  if (obj.baseUrl !== undefined) {
-    if (typeof obj.baseUrl !== "string") throw new Error("jev.baseUrl 必须为字符串");
-    let url: URL;
-    try { url = new URL(obj.baseUrl); } catch { throw new Error("jev.baseUrl 必须是完整的绝对 URL"); }
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && loopbackHosts.has(url.hostname))) {
-      throw new Error("jev.baseUrl 必须使用 https；仅回环地址允许 http");
-    }
-    // Credentials in the URL would be sent on every call and could leak through error text.
-    if (url.username || url.password) throw new Error("jev.baseUrl 不能内嵌凭据");
-    if (url.search || url.hash) throw new Error("jev.baseUrl 不能包含查询串或片段");
-    result.baseUrl = url.toString();
-  }
-  if (obj.model !== undefined) {
-    if (typeof obj.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(obj.model)) {
-      throw new Error("jev.model 必须是 jev 模型名或别名（如 jev-latest），不含 provider 前缀");
-    }
-    result.model = obj.model;
-  }
-  if (obj.apiKeyEnv !== undefined) {
-    if (typeof obj.apiKeyEnv !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(obj.apiKeyEnv)) {
-      throw new Error("jev.apiKeyEnv 必须是合法的环境变量名");
-    }
-    result.apiKeyEnv = obj.apiKeyEnv;
-  }
-  if (obj.apiKey !== undefined) {
-    // Never echo the value itself, here or anywhere else.
-    if (typeof obj.apiKey !== "string" || !/^[^\s\u0000-\u001f\u007f]{1,1024}$/.test(obj.apiKey)) {
-      throw new Error("jev.apiKey 必须为不含空白字符的非空字符串；建议改用 jev.apiKeyEnv");
-    }
-    result.apiKey = obj.apiKey;
-  }
   if (obj.confidenceThreshold !== undefined) {
-    // The 0.5 floor is TypeSafe's own: below it the model reports genuine uncertainty.
+    // A two-option winning probability must beat an even split to decide without the LLM.
     if (typeof obj.confidenceThreshold !== "number" || !Number.isFinite(obj.confidenceThreshold) ||
         obj.confidenceThreshold <= 0.5 || obj.confidenceThreshold > 1) {
       throw new Error("jev.confidenceThreshold 必须是大于 0.5 且不超过 1 的数值");
@@ -145,18 +102,10 @@ export function parseJevConfig(value: unknown): JevConfig {
   return result;
 }
 
-/** Worst-case wall time the prefilter can add, counted into the host's tool-hook budget. */
+/** Budget cap shared by all native candidates and retries; config keeps it below reviewTimeoutMs. */
 export function jevBudgetMs(jev: JevConfig | undefined): number {
   if (!jev || jev.enabled === false) return 0;
   return jev.timeoutMs * (jev.retryCount + 1) + jev.retryDelayMs * jev.retryCount;
-}
-
-/** Resolves the key with `apiKeyEnv` winning; `source` is safe to display, `key` never is. */
-export function jevApiKey(jev: JevConfig): { key?: string; source: "env" | "config" | "none" } {
-  const fromEnv = process.env[jev.apiKeyEnv]?.trim();
-  if (fromEnv) return { key: fromEnv, source: "env" };
-  if (jev.apiKey) return { key: jev.apiKey, source: "config" };
-  return { source: "none" };
 }
 
 export function parseConfig(value: unknown): ReviewConfig {
@@ -217,8 +166,8 @@ export function parseConfig(value: unknown): ReviewConfig {
   if (result.reviewTimeoutMs + result.confirmationTimeoutMs > 110_000) {
     throw new Error("审核与人工确认的总超时不能超过 110000ms（宿主建议 120000ms）");
   }
-  // The prefilter shares the review phase instead of extending it: the 110000ms invariant
-  // and every existing configuration stay valid, and the LLM chain always keeps some time.
+  // Reserve prefilter time inside the review phase, keeping the 110000ms total limit
+  // and leaving a positive configured budget for the LLM chain.
   if (jevBudgetMs(result.jev) >= result.reviewTimeoutMs) {
     throw new Error("jev 前置审查的最坏用时必须小于 reviewTimeoutMs；请调高 reviewTimeoutMs 或降低 jev.timeoutMs/retryCount");
   }
